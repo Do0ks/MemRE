@@ -1,15 +1,15 @@
 # MemRE!
 ![MemRE](https://github.com/user-attachments/assets/d0f206b1-9e23-4e03-97e3-ac6842176cbe)
 
-MemRE is an injectable memory editor with Unreal Engine support! MemRE has an optional launcher if you would like a "Standalone" aspect and will include file association to MemREs .mre(tables) and .MPTR(pointers). 
+MemRE is an injectable memory editor with Unreal Engine support! MemRE has an optional launcher if you would like a "Standalone" aspect and will include file association to MemREs .mre(tables) and .MPTR(pointers).  
+###### Precompiled download comes with MemRE and MemRE Loader.
 ### For more information, join MemRE Discord for full documentation, nightly builds, tutorials, etc: https://discord.gg/7nGkqwdJhn
 
 <a href="http://www.youtube.com/watch?feature=player_embedded&v=ohHAiqsSopQ
 " target="_blank"><img src="http://img.youtube.com/vi/ohHAiqsSopQ/0.jpg" 
-alt="MemRE" width="640" height="580" border="50" /></a>
+alt="MemRE" width="640" height="580" border="1" /></a>
 
 ### Looking for MemRE Launcher? you can find The MemRE Loader source here: https://github.com/Do0ks/MemRELoader
-###### Precompiled download comes with MemRE and MemRE Loader.
 
 Demos/Pictures:
 <Details>
