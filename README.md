@@ -8,7 +8,7 @@ MemRE is an injectable memory editor with Unreal Engine support! MemRE has an op
 " target="_blank"><img src="http://img.youtube.com/vi/ohHAiqsSopQ/0.jpg" 
 alt="MemRE" width="640" height="580" border="50" /></a>
 
-### Looking for MemRE Launcher? you can find The MemRE Loader source here: https://github.com/Do0ks/MemRE
+### Looking for MemRE Launcher? you can find The MemRE Loader source here: https://github.com/Do0ks/MemRELoader
 ###### Precompiled download comes with MemRE and MemRE Loader.
 
 Demos/Pictures:
