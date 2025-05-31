@@ -3,7 +3,7 @@
 
 MemRE is an injectable memory editor with Unreal Engine support! MemRE has an optional launcher if you would like a "Standalone" aspect and will include file association to MemREs .mre(tables) and .MPTR(pointers).  
 ###### Precompiled download comes with MemRE and MemRE Loader.
-### For more information, join MemRE Discord for full documentation, nightly builds, tutorials, etc: https://discord.gg/7nGkqwdJhn
+### For more information, join MemRE Discord for full documentation, nightly builds, tutorials, etc. I also push bug fixes there first: https://discord.gg/7nGkqwdJhn
 
 <a href="http://www.youtube.com/watch?feature=player_embedded&v=ohHAiqsSopQ
 " target="_blank"><img src="http://img.youtube.com/vi/ohHAiqsSopQ/0.jpg" 
