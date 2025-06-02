@@ -5,6 +5,17 @@ MemRE is an injectable memory editor with Unreal Engine support! MemRE has an op
 ###### Precompiled download comes with MemRE and MemRE Loader.
 ### For more information, join MemRE Discord for full documentation, nightly builds, tutorials, etc. I also push bug fixes there first: https://discord.gg/7nGkqwdJhn
 
+### Known Issues/Fixes:
+<Details>
+  
+### Fixed:
+Unknown Initial Value - Updated Release located in Discord: Nightly Builds.  
+  
+### Known Bugs:
+"Bigger Than" and "Smaller Than" is broken, crashes after the 3rd scan. Working on a fix.  
+
+</Details>
+
 <a href="http://www.youtube.com/watch?feature=player_embedded&v=ohHAiqsSopQ
 " target="_blank"><img src="http://img.youtube.com/vi/ohHAiqsSopQ/0.jpg" 
 alt="MemRE" width="640" height="580" border="1" /></a>
