@@ -10,9 +10,10 @@ MemRE is an injectable memory editor with Unreal Engine support! MemRE has an op
   
 ### Fixed:
 Unknown Initial Value - Updated Release located in Discord: Nightly Builds.  
+"Bigger Than" and "Smaller Than" - Updated Release located in Discord: Nightly Builds.
   
 ### Known Bugs:
-"Bigger Than" and "Smaller Than" is broken, crashes after the 3rd scan. Working on a fix.  
+~~"Bigger Than" and "Smaller Than" is broken, crashes after the 3rd scan. Working on a fix.~~  
 
 </Details>
 
