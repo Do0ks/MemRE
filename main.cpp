@@ -1,4 +1,4 @@
-﻿/*
+/*
  * MemRE - Injectable Memory Editor.
  * Author: Do0ks (https://github.com/Do0ks)
  * Copyright (c) 2025 Do0ks
@@ -37,7 +37,7 @@
 #include <Psapi.h>
 #include <uxtheme.h>
 
-/* Linker directives */
+/* Preprocessor includes */
 #include "resource.h"
 #include "GOffsets/GOffsets.h"
 #include "UEVersionScanner/UEVersionScanner.h"
@@ -197,6 +197,35 @@ struct MemoryRegion {
     SIZE_T    size;
 };
 
+//===========================================================================
+// UI Fonts
+//===========================================================================
+HFONT hHeaderFont = CreateFontW(
+    -12, 0, 0, 0,
+    FW_BOLD, FALSE, FALSE, FALSE,
+    DEFAULT_CHARSET, OUT_DEFAULT_PRECIS,
+    CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
+    VARIABLE_PITCH | FF_SWISS,
+    L"Segoe UI"
+);
+
+HFONT hSmallFont = CreateFontW(
+    -10, 0, 0, 0,
+    FW_BOLD, FALSE, FALSE, FALSE,
+    DEFAULT_CHARSET, OUT_DEFAULT_PRECIS,
+    CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
+    VARIABLE_PITCH | FF_SWISS,
+    L"Segoe UI"
+);
+
+HFONT hFont = CreateFontW(
+    16, 0, 0, 0, FW_SEMIBOLD,
+    FALSE, FALSE, FALSE,
+    DEFAULT_CHARSET, OUT_DEFAULT_PRECIS,
+    CLIP_DEFAULT_PRECIS, DEFAULT_QUALITY,
+    DEFAULT_PITCH | FF_SWISS, L"Segoe UI"
+);
+
 
 //===========================================================================
 // Forward Declarations
@@ -240,6 +269,45 @@ LRESULT CALLBACK PointerTableProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPa
 // — Unreal Engine
 void ShowAutoOffsetsDialog(HWND hParent, uintptr_t worldPtr);
 static std::vector<std::pair<uintptr_t, uintptr_t>> g_autoOffsets;
+
+// - WinProc Definitions
+static LRESULT Handle_CopyData(HWND hWnd, LPARAM lParam);
+static LRESULT Handle_CtlColorStatic(WPARAM wParam, LPARAM lParam);
+static LRESULT Handle_Create(HWND hWnd, LPARAM lParam);
+static LRESULT Handle_Timer(HWND hWnd);
+static LRESULT Handle_Notify(HWND hWnd, WPARAM wParam, LPARAM lParam);
+static LRESULT Handle_Command(HWND hWnd, WPARAM wParam, LPARAM lParam);
+static LRESULT Handle_Destroy(HWND hWnd);
+
+// (In‑place edit)
+void SubclassEditControl(HWND hEdit);
+
+// ScanResultPager is a class:
+class ScanResultPager;
+
+// Prototypes for “Show…” and “Select…” and “Inject/Attach…” helpers, 
+
+void ShowEditAddressDialog(HWND hParent, int index);
+void ShowAddAddressDialog(HWND hParent);
+
+void SelectProcessDialog(HWND hParent);
+void AttachToProcess(DWORD pid);
+void InjectSelfIntoProcess(DWORD pid);
+
+// (Saved‑entry re‑resolution)
+void ResolvePendingSavedEntries();
+
+// (UI Helpers)
+void UpdateScanButtons(bool enabled);
+void UpdateScanResultsListView();
+void UpdateScanStatus();
+
+// (Scan core)
+bool PerformFirstScan(double searchVal, DataType dt, SearchMode searchMode);
+bool PerformNextScan(double searchVal, DataType dt, SearchMode searchMode);
+bool UndoScan();
+void ResetScans();
+bool GetSearchValueFromEdit(double& value);
 
 //===========================================================================
 // Global Variables
@@ -338,6 +406,99 @@ const float            epsilon_float = 0.001f;
 //===========================================================================
 // Helper Functions
 //===========================================================================
+
+// - Scan Pager
+class ScanResultPager {
+public:
+    ScanResultPager(const std::wstring& folder, size_t pageSizeEntries, int scanId)
+        : m_folder(folder), m_pageSize(pageSizeEntries), m_totalEntries(0), m_scanId(scanId)
+    {
+        CreateNewPage();
+    }
+    ~ScanResultPager()
+    {
+        for (auto& page : m_pages)
+        {
+            if (page.data) UnmapViewOfFile(page.data);
+            if (page.hMap) CloseHandle(page.hMap);
+            if (page.hFile != INVALID_HANDLE_VALUE) CloseHandle(page.hFile);
+            DeleteFileW(page.filePath.c_str());
+        }
+        m_pages.clear();
+    }
+    void Append(const ScanEntry& entry)
+    {
+        if (m_pages.empty() || m_pages.back().count >= m_pageSize)
+        {
+            if (!CreateNewPage())
+                return;
+        }
+        MappedPage& page = m_pages.back();
+        page.data[page.count] = entry;
+        page.count++;
+        m_totalEntries++;
+    }
+    bool GetEntry(size_t index, ScanEntry& entry) const
+    {
+        if (index >= m_totalEntries)
+            return false;
+        size_t pageIndex = index / m_pageSize;
+        size_t indexInPage = index % m_pageSize;
+        entry = m_pages[pageIndex].data[indexInPage];
+        return true;
+    }
+    size_t Count() const { return m_totalEntries; }
+private:
+    struct MappedPage {
+        HANDLE hFile;
+        HANDLE hMap;
+        ScanEntry* data;
+        size_t count;
+        std::wstring filePath;
+    };
+    bool CreateNewPage()
+    {
+        MappedPage page = { 0 };
+        page.count = 0;
+        std::wstringstream ss;
+        ss << m_folder << L"\\scan_page_" << m_scanId << L"_" << m_pages.size() << L".dat";
+        page.filePath = ss.str();
+        HANDLE hFile = CreateFileW(page.filePath.c_str(), GENERIC_READ | GENERIC_WRITE,
+            0, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+        if (hFile == INVALID_HANDLE_VALUE)
+            return false;
+        page.hFile = hFile;
+        LARGE_INTEGER liSize;
+        liSize.QuadPart = m_pageSize * sizeof(ScanEntry);
+        if (!SetFilePointerEx(hFile, liSize, NULL, FILE_BEGIN) || !SetEndOfFile(hFile))
+        {
+            CloseHandle(hFile);
+            return false;
+        }
+        HANDLE hMap = CreateFileMappingW(hFile, NULL, PAGE_READWRITE, 0, 0, NULL);
+        if (hMap == NULL)
+        {
+            CloseHandle(hFile);
+            return false;
+        }
+        page.hMap = hMap;
+        ScanEntry* pData = (ScanEntry*)MapViewOfFile(hMap, FILE_MAP_ALL_ACCESS, 0, 0, m_pageSize * sizeof(ScanEntry));
+        if (pData == NULL)
+        {
+            CloseHandle(hMap);
+            CloseHandle(hFile);
+            return false;
+        }
+        page.data = pData;
+        m_pages.push_back(page);
+        return true;
+    }
+    std::wstring m_folder;
+    size_t m_pageSize;
+    size_t m_totalEntries;
+    int m_scanId;
+    std::vector<MappedPage> m_pages;
+};
 
 // — File & Table I/O
 static void AdjustSavedListColumns()
@@ -1056,7 +1217,6 @@ static std::vector<std::wstring> splitPointerExpr(const std::wstring& line) {
     return parts;
 }
 
-
 // — B2D Scanner - Unreal Engine Addition
 static std::vector<std::wstring> ParseNames(const std::wstring& log)
 {
@@ -1366,6 +1526,1663 @@ static std::string FormatChain(uintptr_t base,
     return oss.str();
 }
 
+// - WinProc Helpers
+static LRESULT Handle_CopyData(HWND hWnd, LPARAM lParam)
+{
+    PCOPYDATASTRUCT cds = (PCOPYDATASTRUCT)lParam;
+    if (cds->dwData == 1 && cds->lpData) {
+        LPCWSTR path = (LPCWSTR)cds->lpData;
+        LoadTableFromFile(path);
+    }
+    return TRUE;
+}
+
+static LRESULT Handle_CtlColorStatic(WPARAM wParam, LPARAM lParam)
+{
+    HDC hdcStatic = (HDC)wParam;
+    SetBkMode(hdcStatic, TRANSPARENT);
+    return (LRESULT)(GetSysColorBrush(COLOR_WINDOW));
+}
+
+static LRESULT Handle_Create(HWND hWnd, LPARAM lParam)
+{
+    HMENU hMenu = CreateMenu();
+    MENUITEMINFO mii = { sizeof(mii) };
+
+    mii.fMask = MIIM_FTYPE | MIIM_ID | MIIM_STRING;
+    mii.fType = MFT_STRING;
+    mii.wID = ID_MENU_ATTACH;
+    mii.dwTypeData = const_cast<LPWSTR>(L"Attach");
+    InsertMenuItemW(hMenu, 0, TRUE, &mii);
+
+    mii.fMask = MIIM_FTYPE | MIIM_ID | MIIM_STRING;
+    mii.fType = MFT_STRING;
+    mii.wID = ID_MENU_THREAD;
+    mii.dwTypeData = const_cast<LPWSTR>(L"Inject");
+    InsertMenuItemW(hMenu, 1, TRUE, &mii);
+
+    mii.fMask = MIIM_FTYPE | MIIM_ID | MIIM_STRING;
+    mii.fType = MFT_STRING | MFT_RIGHTJUSTIFY;
+    mii.wID = ID_MENU_PROCINFO;
+    mii.dwTypeData = const_cast<LPWSTR>(L"");
+    InsertMenuItemW(hMenu, 2, TRUE, &mii);
+
+    SetMenu(hWnd, hMenu);
+
+    {
+        wchar_t fullPath[MAX_PATH] = {};
+        DWORD   len = MAX_PATH;
+        if (QueryFullProcessImageNameW(
+            GetCurrentProcess(),
+            0,
+            fullPath,
+            &len
+        ))
+        {
+            wchar_t* exeName = wcsrchr(fullPath, L'\\');
+            exeName = exeName ? exeName + 1 : fullPath;
+
+            wchar_t info[128];
+            swprintf(info, 128, L"%s (PID: %lu)",
+                exeName,
+                GetCurrentProcessId());
+
+            MENUITEMINFO miiInfo = { sizeof(miiInfo) };
+            miiInfo.fMask = MIIM_STRING;
+            miiInfo.dwTypeData = info;
+            SetMenuItemInfoW(hMenu, ID_MENU_PROCINFO, FALSE, &miiInfo);
+            DrawMenuBar(hWnd);
+        }
+    }
+
+    HINSTANCE hInst = ((LPCREATESTRUCT)lParam)->hInstance;
+
+    g_hStaticScanStatus = CreateWindowExW(
+        WS_EX_CLIENTEDGE, L"STATIC", L"Displaying 0 values out of 0",
+        WS_CHILD | WS_VISIBLE, 10, 10, 450, 25,
+        hWnd, (HMENU)IDC_STATIC_SCANSTATUS, hInst, NULL
+    );
+    g_hProgressBar = CreateWindowExW(
+        0, PROGRESS_CLASS, NULL,
+        WS_CHILD | WS_VISIBLE, 10, 40, 450, 20,
+        hWnd, (HMENU)IDC_PROGRESS_BAR, hInst, NULL
+    );
+
+    g_hListScanResults = CreateWindowExW(
+        WS_EX_CLIENTEDGE, WC_LISTVIEW, L"",
+        WS_CHILD | WS_VISIBLE | LVS_REPORT | LVS_SINGLESEL,
+        10, 65, 450, 235,
+        hWnd, (HMENU)IDC_LIST_SCANRESULTS, hInst, NULL
+    );
+    ListView_SetExtendedListViewStyle(
+        g_hListScanResults,
+        ListView_GetExtendedListViewStyle(g_hListScanResults)
+        | LVS_EX_DOUBLEBUFFER
+    );
+    {
+        LVCOLUMN col = { LVCF_TEXT | LVCF_WIDTH };
+        col.pszText = const_cast<LPWSTR>(L"Address");  col.cx = 150;
+        ListView_InsertColumn(g_hListScanResults, 0, &col);
+        col.pszText = const_cast<LPWSTR>(L"Value");    col.cx = 100;
+        ListView_InsertColumn(g_hListScanResults, 1, &col);
+        col.pszText = const_cast<LPWSTR>(L"Previous"); col.cx = 100;
+        ListView_InsertColumn(g_hListScanResults, 2, &col);
+        col.pszText = const_cast<LPWSTR>(L"First");    col.cx = 96;
+        ListView_InsertColumn(g_hListScanResults, 3, &col);
+    }
+
+    g_hListSavedAddresses = CreateWindowExW(
+        WS_EX_CLIENTEDGE, WC_LISTVIEW, L"",
+        WS_CHILD | WS_VISIBLE | LVS_REPORT | LVS_SINGLESEL,
+        10, 305, 450, 165,
+        hWnd, (HMENU)IDC_LIST_SAVEDADDR, hInst, NULL
+    );
+    DWORD ex = ListView_GetExtendedListViewStyle(g_hListSavedAddresses);
+    ListView_SetExtendedListViewStyle(
+        g_hListSavedAddresses,
+        ex
+        | LVS_EX_CHECKBOXES
+        | LVS_EX_FULLROWSELECT
+        | LVS_EX_DOUBLEBUFFER
+    );
+    {
+        LVCOLUMN col = { LVCF_TEXT | LVCF_WIDTH };
+        col.pszText = const_cast<LPWSTR>(L"Freeze");     col.cx = 50;
+        ListView_InsertColumn(g_hListSavedAddresses, 0, &col);
+        col.pszText = const_cast<LPWSTR>(L"Description"); col.cx = 126;
+        ListView_InsertColumn(g_hListSavedAddresses, 1, &col);
+        col.pszText = const_cast<LPWSTR>(L"Address");    col.cx = 100;
+        ListView_InsertColumn(g_hListSavedAddresses, 2, &col);
+        col.pszText = const_cast<LPWSTR>(L"Type");       col.cx = 70;
+        ListView_InsertColumn(g_hListSavedAddresses, 3, &col);
+        col.pszText = const_cast<LPWSTR>(L"Value");      col.cx = 70;
+        ListView_InsertColumn(g_hListSavedAddresses, 4, &col);
+        col.pszText = const_cast<LPWSTR>(L"Del");        col.cx = 30;
+        ListView_InsertColumn(g_hListSavedAddresses, 5, &col);
+    }
+
+    const int btnX = 480, btnY = 10, btnW = 100, btnH = 25, gap = 10;
+    g_hBtnFirstScan = CreateWindowW(
+        L"BUTTON", L"First Scan",
+        WS_TABSTOP | WS_VISIBLE | WS_CHILD | BS_DEFPUSHBUTTON | BS_FLAT,
+        btnX, btnY, btnW, btnH, hWnd, (HMENU)IDC_BTN_FIRSTSCAN, hInst, NULL
+    );
+    g_hBtnNextScan = CreateWindowW(
+        L"BUTTON", L"Next Scan",
+        WS_TABSTOP | WS_VISIBLE | WS_CHILD | BS_DEFPUSHBUTTON | BS_FLAT,
+        btnX + 1 * (btnW + gap), btnY, btnW, btnH, hWnd, (HMENU)IDC_BTN_NEXTSCAN, hInst, NULL
+    );
+    g_hBtnUndoScan = CreateWindowW(
+        L"BUTTON", L"Undo Scan",
+        WS_TABSTOP | WS_VISIBLE | WS_CHILD | BS_DEFPUSHBUTTON | BS_FLAT,
+        btnX + 2 * (btnW + gap), btnY, btnW, btnH, hWnd, (HMENU)IDC_BTN_UNDOSCAN, hInst, NULL
+    );
+    g_hBtnNewScan = CreateWindowW(
+        L"BUTTON", L"New Scan",
+        WS_TABSTOP | WS_VISIBLE | WS_CHILD | BS_DEFPUSHBUTTON | BS_FLAT,
+        btnX + 3 * (btnW + gap), btnY, btnW, btnH, hWnd, (HMENU)IDC_BTN_NEWSCAN, hInst, NULL
+    );
+
+    int addY = btnY + btnH + 10 + 300 - (btnH + 10);
+    HWND hBtnAddAddress = CreateWindowW(
+        L"BUTTON", L"Add Address",
+        WS_TABSTOP | WS_VISIBLE | WS_CHILD | BS_DEFPUSHBUTTON | BS_FLAT,
+        btnX, addY, btnW, btnH, hWnd, (HMENU)IDC_BTN_ADDADDRESS, hInst, NULL
+    );
+
+    const int verticalPadding = 5;
+    int lblY = btnY + btnH + 10 + verticalPadding;
+    HWND hLblValue = CreateWindowExW(
+        0, L"STATIC", L"Value:",
+        WS_CHILD | WS_VISIBLE | SS_LEFT,
+        btnX, lblY, 60, 20,
+        hWnd, NULL, hInst, NULL
+    );
+    SendMessageW(hLblValue, WM_SETFONT, (WPARAM)hFont, TRUE);
+
+    int editW = 4 * btnW + 3 * gap;
+    int editY = lblY + 20;
+    g_hEditValue = CreateWindowExW(
+        WS_EX_CLIENTEDGE, L"EDIT", L"",
+        WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL,
+        btnX, editY, editW, 25, hWnd, (HMENU)IDC_EDIT_VALUE, hInst, NULL
+    );
+
+    int comboY = editY + 25 + 5;
+    const int comboW = 210, comboH = 100;
+    g_hComboValueType = CreateWindowExW(
+        WS_EX_CLIENTEDGE, L"COMBOBOX", L"",
+        WS_CHILD | WS_VISIBLE | CBS_DROPDOWNLIST,
+        btnX, comboY, comboW, comboH, hWnd, (HMENU)IDC_COMBO_VALUETYPE, hInst, NULL
+    );
+    for (auto* s : { L"Byte",L"2 Byte",L"4 Byte",L"8 Byte",L"Float",L"Double" })
+        SendMessageW(g_hComboValueType, CB_ADDSTRING, 0, (LPARAM)s);
+    SendMessageW(g_hComboValueType, CB_SETCURSEL, 2, 0);
+
+    HWND hComboSearch = CreateWindowExW(
+        WS_EX_CLIENTEDGE, L"COMBOBOX", L"",
+        WS_CHILD | WS_VISIBLE | CBS_DROPDOWNLIST,
+        btnX + comboW + gap, comboY, comboW, comboH, hWnd, (HMENU)IDC_COMBO_SEARCHMODE, hInst, NULL
+    );
+    for (auto* s : { L"Exact Value",L"Bigger Than",L"Smaller Than",
+                     L"Increased Value", L"Decreased Value",
+                     L"Unchanged Value", L"Unknown Initial Value" })
+        SendMessageW(hComboSearch, CB_ADDSTRING, 0, (LPARAM)s);
+    SendMessageW(hComboSearch, CB_SETCURSEL, 0, 0);
+
+    int frameY = comboY + comboH - 65;
+    HWND g_hChainFrame = CreateWindowExW(
+        0, L"STATIC", NULL,
+        WS_CHILD | WS_VISIBLE | SS_BLACKFRAME,
+        btnX, frameY, editW, 160,
+        hWnd, (HMENU)IDC_CHAIN_FRAME, hInst, NULL
+    );
+    SendMessageW(g_hChainFrame, WM_SETFONT, (WPARAM)hSmallFont, TRUE);
+
+    SIZE hdrSz;
+    {
+        HDC hdc = GetDC(hWnd);
+        HFONT oldF = (HFONT)SelectObject(hdc, hSmallFont);
+        GetTextExtentPoint32W(hdc, L"Pointer Scanner", lstrlenW(L"Pointer Scanner"), &hdrSz);
+        SelectObject(hdc, oldF);
+        ReleaseDC(hWnd, hdc);
+    }
+
+    int textY = frameY - (hdrSz.cy / 2);
+    HWND hLblBase = CreateWindowW(
+        L"STATIC", L"Pointer Scanner",
+        WS_CHILD | WS_VISIBLE | SS_LEFT,
+        btnX + 8, textY,
+        hdrSz.cx, hdrSz.cy,
+        hWnd, NULL, hInst, NULL
+    );
+    SendMessageW(hLblBase, WM_SETFONT, (WPARAM)hSmallFont, TRUE);
+
+    int groupX = btnX + 256;
+    int margin = 4;
+    int offsX = groupX + margin;
+
+    HDC hdc2 = GetDC(hWnd);
+    HFONT oldF2 = (HFONT)SelectObject(hdc2, hSmallFont);
+    GetTextExtentPoint32W(
+        hdc2,
+        L"Positional Offsets",
+        lstrlenW(L"Positional Offsets"),
+        &hdrSz
+    );
+    SelectObject(hdc2, oldF2);
+    ReleaseDC(hWnd, hdc2);
+
+    HWND hLblOffsets = CreateWindowW(
+        L"STATIC", L"Positional Offsets",
+        WS_CHILD | WS_VISIBLE | SS_LEFT,
+        offsX, textY,
+        hdrSz.cx, hdrSz.cy,
+        hWnd, NULL, hInst, NULL
+    );
+    SendMessageW(hLblOffsets, WM_SETFONT, (WPARAM)hSmallFont, TRUE);
+
+    int newAddY = frameY + 160 + 10;
+    SetWindowPos(hBtnAddAddress, NULL, btnX, newAddY, 0, 0, SWP_NOSIZE | SWP_NOZORDER);
+
+    int labelX = btnX + 8;
+    int labelW = 75;
+    int labelGap = 1;
+    int editX = labelX + labelW + labelGap;
+
+    CreateWindowW(L"STATIC", L"Base Addr:",
+        WS_CHILD | WS_VISIBLE | SS_LEFT,
+        labelX, frameY + 18, labelW, 20,
+        hWnd, (HMENU)IDC_STATIC_BASE_ADDRESS, hInst, NULL);
+
+    g_hEditBaseAddress = CreateWindowExW(
+        WS_EX_CLIENTEDGE, L"EDIT", L"",
+        WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL,
+        editX, frameY + 16, 160, 24,
+        hWnd, (HMENU)IDC_EDIT_BASE_ADDRESS, hInst, NULL);
+    g_oldBaseAddrProc = (WNDPROC)SetWindowLongPtrW(
+        g_hEditBaseAddress,
+        GWLP_WNDPROC,
+        (LONG_PTR)BaseAddrEditProc
+    );
+
+    CreateWindowW(L"STATIC", L"Dyn Addr:",
+        WS_CHILD | WS_VISIBLE | SS_LEFT,
+        labelX, frameY + 16 + 32, labelW, 20,
+        hWnd, (HMENU)IDC_STATIC_DYNAMIC_ADDRESS, hInst, NULL);
+
+    g_hDynamicAddressEdit = CreateWindowExW(
+        WS_EX_CLIENTEDGE, L"EDIT", L"",
+        WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL,
+        editX, frameY + 14 + 32, 160, 24,
+        hWnd, (HMENU)IDC_EDIT_DYNAMIC_ADDRESS, hInst, NULL);
+
+    CreateWindowW(L"STATIC", L"Max Depth:",
+        WS_CHILD | WS_VISIBLE | SS_LEFT,
+        labelX, frameY + 16 + 62, labelW, 20,
+        hWnd, (HMENU)IDC_STATIC_MAXDEPTH, hInst, NULL);
+
+    for (int id : { IDC_STATIC_BASE_ADDRESS,
+        IDC_STATIC_DYNAMIC_ADDRESS,
+        IDC_STATIC_MAXDEPTH })
+    {
+        HWND hLbl = GetDlgItem(hWnd, id);
+        SendMessageW(hLbl, WM_SETFONT, (WPARAM)hHeaderFont, TRUE);
+    }
+
+    g_hEditMaxDepth = CreateWindowExW(
+        WS_EX_CLIENTEDGE, L"EDIT", L"3",
+        WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL,
+        editX, frameY + 15 + 60, 40, 24,
+        hWnd, (HMENU)IDC_EDIT_MAXDEPTH, hInst, NULL);
+
+    // Checkbox: “Scan From Saved File”  
+    HWND hChkSaved = CreateWindowW(
+        L"BUTTON", L"Scan From File",
+        WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX,
+        editX + 55,
+        frameY + 17 + 60,
+        110, 20,
+        hWnd, (HMENU)IDC_CHECK_SCAN_SAVED_FILE, hInst, NULL);
+    SendMessageW(hChkSaved, WM_SETFONT, (WPARAM)hSmallFont, TRUE);
+
+    g_hBtnPointerScan = CreateWindowW(
+        L"BUTTON", L"Scan",
+        WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON | BS_FLAT,
+        editX - 60, frameY + 116, 90, 28,
+        hWnd, (HMENU)IDC_BTN_POINTERSCAN, hInst, NULL);
+    SendMessageW(g_hBtnPointerScan, WM_SETFONT, (WPARAM)hHeaderFont, TRUE);
+
+    g_hBtnViewPTRs = CreateWindowW(
+        L"BUTTON", L"View PTRs",
+        WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON | BS_FLAT,
+        editX + 50, frameY + 116,
+        90, 28,
+        hWnd, (HMENU)IDC_BTN_VIEWPTRS, hInst, NULL);
+    SendMessageW(g_hBtnViewPTRs, WM_SETFONT, (WPARAM)hHeaderFont, TRUE);
+
+    int groupY = frameY + 1;
+    int groupW = 167;
+    int groupH = 153;
+
+    {
+        const int margin = 4;
+        const int titleH = 16;
+        const int listX = groupX + margin;
+        const int listY = groupY + margin + titleH - 5;
+        const int listW = groupW - margin * 2;
+        const int listH = 70 + 17;
+        g_hListOffsets = CreateWindowExW(
+            WS_EX_CLIENTEDGE, WC_LISTBOX, L"",
+            WS_CHILD | WS_VISIBLE | LBS_NOTIFY | WS_VSCROLL,
+            listX, listY, listW, listH,
+            hWnd, (HMENU)IDC_LIST_OFFSETS, hInst, NULL
+        );
+        g_oldOffsetsProc = (WNDPROC)SetWindowLongPtrW(
+            g_hListOffsets,
+            GWLP_WNDPROC,
+            (LONG_PTR)OffsetsListProc
+        );
+
+        const int editH = 24;
+        const int editY = listY + listH + margin - 4;
+        g_hEditOffsetEntry = CreateWindowExW(
+            WS_EX_CLIENTEDGE, L"EDIT", L"",
+            WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL,
+            listX, editY, listW, editH,
+            hWnd, (HMENU)IDC_EDIT_OFFSETNEW, hInst, NULL
+        );
+
+        g_oldOffsetEditProc = (WNDPROC)SetWindowLongPtrW(
+            g_hEditOffsetEntry,
+            GWLP_WNDPROC,
+            (LONG_PTR)EditOffsetProc
+        );
+
+        const int btnH = 22;
+        const int btnW = 50;
+        const int btnGap = 5;
+        const int btnY2 = editY + editH + 4;
+        g_hBtnAddOffset = CreateWindowW(
+            L"BUTTON", L"Add",
+            WS_CHILD | WS_VISIBLE,
+            listX, btnY2, btnW, btnH,
+            hWnd, (HMENU)IDC_BTN_OFFSET_ADD, hInst, NULL
+        );
+        g_hBtnRemoveOffset = CreateWindowW(
+            L"BUTTON", L"Del",
+            WS_CHILD | WS_VISIBLE,
+            listX + btnW + btnGap, btnY2, btnW, btnH,
+            hWnd, (HMENU)IDC_BTN_OFFSET_DEL, hInst, NULL
+        );
+        g_hBtnAutoOffset = CreateWindowW(
+            L"BUTTON", L"Auto",
+            WS_CHILD | WS_VISIBLE,
+            listX + 2 * (btnW + btnGap),
+            btnY2, btnW, btnH,
+            hWnd, (HMENU)IDC_BTN_OFFSET_AUTO, hInst, NULL
+        );
+        EnableWindow(g_hBtnAutoOffset, FALSE);
+        SendMessageW(g_hBtnAddOffset, WM_SETFONT, (WPARAM)hHeaderFont, TRUE);
+        SendMessageW(g_hBtnRemoveOffset, WM_SETFONT, (WPARAM)hHeaderFont, TRUE);
+        SendMessageW(g_hBtnAutoOffset, WM_SETFONT, (WPARAM)hHeaderFont, TRUE);
+    }
+
+    const int subGap = 5;
+    HWND hBtnSaveTable = CreateWindowW(
+        L"BUTTON", L"Save Table",
+        WS_TABSTOP | WS_VISIBLE | WS_CHILD | BS_DEFPUSHBUTTON | BS_FLAT,
+        btnX, newAddY + (btnH + subGap) * 1, btnW, btnH,
+        hWnd, (HMENU)IDC_BTN_SAVETABLE, hInst, NULL
+    );
+    HWND hBtnLoadTable = CreateWindowW(
+        L"BUTTON", L"Load Table",
+        WS_TABSTOP | WS_VISIBLE | WS_CHILD | BS_DEFPUSHBUTTON | BS_FLAT,
+        btnX, newAddY + (btnH + subGap) * 2, btnW, btnH,
+        hWnd, (HMENU)IDC_BTN_LOADTABLE, hInst, NULL
+    );
+    HWND hBtnSaveCT = CreateWindowW(
+        L"BUTTON", L"Save as .CT",
+        WS_TABSTOP | WS_VISIBLE | WS_CHILD | BS_DEFPUSHBUTTON | BS_FLAT,
+        btnX, newAddY + (btnH + subGap) * 3, btnW, btnH,
+        hWnd, (HMENU)IDC_BTN_SAVECT, hInst, NULL
+    );
+
+    const int exitGap = 20;
+    int exitY = newAddY + (btnH + subGap) * 4 + exitGap;
+
+    HWND hBtnExit = CreateWindowW(
+        L"BUTTON", L"Exit",
+        WS_TABSTOP | WS_VISIBLE | WS_CHILD | BS_DEFPUSHBUTTON | BS_FLAT,
+        btnX, exitY, btnW, btnH,
+        hWnd, (HMENU)IDC_BTN_EXIT, hInst, NULL
+    );
+
+    int logX = btnX + btnW + gap;
+    int logY = newAddY;
+    int logW = 320, logH = 165;
+
+    g_hOutputLog = CreateWindowExW(
+        WS_EX_CLIENTEDGE, L"EDIT", L"MemRE Logs:\r\n\r\n",
+        WS_CHILD | WS_VISIBLE | ES_MULTILINE | ES_AUTOVSCROLL | WS_VSCROLL | ES_READONLY | ES_NOHIDESEL,
+        logX, logY, logW, logH,
+        hWnd, (HMENU)IDC_EDIT_LOG, hInst, NULL
+    );
+    g_oldLogProc = (WNDPROC)SetWindowLongPtrW(g_hOutputLog, GWLP_WNDPROC, (LONG_PTR)LogEditProc);
+
+
+    HWND ctrls[] = {
+        (HWND)g_hEditValue, g_hComboValueType, hComboSearch,
+        g_hBtnFirstScan, g_hBtnNextScan, g_hBtnUndoScan, g_hBtnNewScan,
+        hBtnAddAddress, hBtnSaveTable, hBtnLoadTable, hBtnSaveCT,
+        hBtnExit, g_hOutputLog, g_hEditBaseAddress, g_hDynamicAddressEdit,
+        g_hEditMaxDepth, g_hEditOffsetEntry, g_hBtnAutoOffset, g_hBtnViewPTRs
+    };
+    for (HWND ctrl : ctrls)
+        SendMessageW(ctrl, WM_SETFONT, (WPARAM)hFont, TRUE);
+
+    SendMessageW(g_hListOffsets, WM_SETFONT, (WPARAM)hFont, TRUE);
+    SetWindowTheme(g_hListScanResults, L"Explorer", NULL);
+    SetWindowTheme(g_hListSavedAddresses, L"Explorer", NULL);
+    SetTimer(hWnd, IDT_UPDATE_TIMER, UPDATE_INTERVAL_MS, NULL);
+    UpdateScanButtons(false);
+
+    return 0;
+}
+
+static LRESULT Handle_Timer(HWND hWnd)
+{
+    if (g_hPointerScanThread &&
+        WaitForSingleObject(g_hPointerScanThread, 0) == WAIT_OBJECT_0)
+    {
+        CloseHandle(g_hPointerScanThread);
+        g_hPointerScanThread = nullptr;
+        g_isPointerScanning = false;
+        SetWindowTextW(g_hBtnPointerScan, L"Scan");
+
+        EnableWindow(g_hEditBaseAddress, TRUE);
+        EnableWindow(g_hDynamicAddressEdit, TRUE);
+        EnableWindow(g_hEditMaxDepth, TRUE);
+        EnableWindow(g_hListOffsets, TRUE);
+        EnableWindow(g_hBtnAddOffset, TRUE);
+        EnableWindow(g_hBtnRemoveOffset, TRUE);
+        EnableWindow(g_hBtnAutoOffset, TRUE);
+        EnableWindow(GetDlgItem(hWnd, IDC_CHECK_SCAN_SAVED_FILE), TRUE);
+    }
+
+    if (!g_savedEntries.empty()) {
+        ResolvePendingSavedEntries();
+    }
+    if (!g_lastDisplayedEntries.empty())
+    {
+        HANDLE hProcess = g_hTargetProcess;
+        for (size_t i = 0; i < g_lastDisplayedEntries.size(); i++)
+        {
+            ScanEntry oldCurrent = g_lastDisplayedEntries[i];
+            ScanEntry newEntry = oldCurrent;
+            bool updated = false;
+            if (newEntry.dataType == DATA_BYTE)
+            {
+                uint8_t val = 0;
+                if (ReadProcessMemory(hProcess, (LPCVOID)newEntry.address, &val, sizeof(val), NULL))
+                    if (val != oldCurrent.value.valByte) { newEntry.value.valByte = val; updated = true; }
+            }
+            else if (newEntry.dataType == DATA_2BYTE)
+            {
+                uint16_t val = 0;
+                if (ReadProcessMemory(hProcess, (LPCVOID)newEntry.address, &val, sizeof(val), NULL))
+                    if (val != oldCurrent.value.val2Byte) { newEntry.value.val2Byte = val; updated = true; }
+            }
+            else if (newEntry.dataType == DATA_4BYTE)
+            {
+                uint32_t val = 0;
+                if (ReadProcessMemory(hProcess, (LPCVOID)newEntry.address, &val, sizeof(val), NULL))
+                    if (val != oldCurrent.value.val4Byte) { newEntry.value.val4Byte = val; updated = true; }
+            }
+            else if (newEntry.dataType == DATA_8BYTE)
+            {
+                uint64_t val = 0;
+                if (ReadProcessMemory(hProcess, (LPCVOID)newEntry.address, &val, sizeof(val), NULL))
+                    if (val != oldCurrent.value.val8Byte) { newEntry.value.val8Byte = val; updated = true; }
+            }
+            else if (newEntry.dataType == DATA_FLOAT)
+            {
+                float val = 0;
+                if (ReadProcessMemory(hProcess, (LPCVOID)newEntry.address, &val, sizeof(val), NULL))
+                    if (fabs(val - oldCurrent.value.valFloat) > epsilon_float) { newEntry.value.valFloat = val; updated = true; }
+            }
+            else if (newEntry.dataType == DATA_DOUBLE)
+            {
+                double val = 0;
+                if (ReadProcessMemory(hProcess, (LPCVOID)newEntry.address, &val, sizeof(val), NULL))
+                    if (fabs(val - oldCurrent.value.valDouble) > epsilon_double) { newEntry.value.valDouble = val; updated = true; }
+            }
+            if (updated)
+            {
+                wchar_t currStr[64] = { 0 };
+                switch (newEntry.dataType)
+                {
+                case DATA_BYTE:   swprintf(currStr, 64, L"%u", newEntry.value.valByte); break;
+                case DATA_2BYTE:  swprintf(currStr, 64, L"%u", newEntry.value.val2Byte); break;
+                case DATA_4BYTE:  swprintf(currStr, 64, L"%u", newEntry.value.val4Byte); break;
+                case DATA_8BYTE:  swprintf(currStr, 64, L"%llu", newEntry.value.val8Byte); break;
+                case DATA_FLOAT:  swprintf(currStr, 64, L"%.4f", newEntry.value.valFloat); break;
+                case DATA_DOUBLE: swprintf(currStr, 64, L"%.4f", newEntry.value.valDouble); break;
+                default: swprintf(currStr, 64, L"Unknown"); break;
+                }
+                ListView_SetItemText(g_hListScanResults, (int)i, 1, currStr);
+                g_itemChanged[i] = true;
+                g_lastDisplayedEntries[i] = newEntry;
+            }
+        }
+        InvalidateRect(g_hListScanResults, NULL, TRUE);
+    }
+    if (g_isAttached)
+    {
+        DWORD exitCode = 0;
+        if (GetExitCodeProcess(g_hTargetProcess, &exitCode) && exitCode != STILL_ACTIVE)
+        {
+            DWORD oldPID = g_targetProcessId;
+            CloseHandle(g_hTargetProcess);
+
+            g_hTargetProcess = GetCurrentProcess();
+            g_targetProcessId = GetCurrentProcessId();
+            g_isAttached = false;
+
+            HMENU hMenu = GetMenu(hWnd);
+            MENUITEMINFO mii = { sizeof(mii) };
+            mii.fMask = MIIM_STRING;
+            mii.dwTypeData = const_cast<LPWSTR>(L"Attach");
+            SetMenuItemInfoW(hMenu, ID_MENU_ATTACH, FALSE, &mii);
+
+            WCHAR myPath[MAX_PATH];
+            GetModuleFileNameW(NULL, myPath, MAX_PATH);
+            WCHAR* myExe = wcsrchr(myPath, L'\\');
+            myExe = myExe ? myExe + 1 : myPath;
+            WCHAR info[128];
+            swprintf_s(info, _countof(info), L"%s (PID: %lu)", myExe, g_targetProcessId);
+            MENUITEMINFO miiInfo = { sizeof(miiInfo) };
+            miiInfo.fMask = MIIM_STRING;
+            miiInfo.dwTypeData = info;
+            SetMenuItemInfoW(hMenu, ID_MENU_PROCINFO, FALSE, &miiInfo);
+
+            DrawMenuBar(hWnd);
+
+            std::wstring msg = L"Process (PID: " + std::to_wstring(oldPID) + L") exited, detached.\r\n\r\n";
+            Log(msg.c_str());
+
+            SendMessageW(g_hWndMain, WM_COMMAND, MAKEWPARAM(IDC_BTN_NEWSCAN, 0), 0);
+        }
+    }
+    {
+        HANDLE hProcess = g_hTargetProcess;
+        for (size_t i = 0; i < g_savedEntries.size(); i++)
+        {
+            SavedEntry& saved = g_savedEntries[i];
+            wchar_t newValueStr[64] = { 0 };
+            switch (saved.savedType)
+            {
+            case DATA_BYTE:
+            {
+                uint8_t memVal = 0;
+                if (ReadProcessMemory(hProcess, (LPCVOID)saved.entry.address, &memVal, sizeof(memVal), NULL))
+                {
+                    if (saved.freeze) { WriteProcessMemory(hProcess, (LPVOID)saved.entry.address, &saved.entry.value.valByte, sizeof(uint8_t), NULL); memVal = saved.entry.value.valByte; }
+                    else if (memVal != saved.entry.value.valByte) { saved.entry.value.valByte = memVal; }
+                    swprintf(newValueStr, 64, L"%u", memVal);
+                }
+            }
+            break;
+            case DATA_2BYTE:
+            {
+                uint16_t memVal = 0;
+                if (ReadProcessMemory(hProcess, (LPCVOID)saved.entry.address, &memVal, sizeof(memVal), NULL))
+                {
+                    if (saved.freeze) { WriteProcessMemory(hProcess, (LPVOID)saved.entry.address, &saved.entry.value.val2Byte, sizeof(uint16_t), NULL); memVal = saved.entry.value.val2Byte; }
+                    else if (memVal != saved.entry.value.val2Byte) { saved.entry.value.val2Byte = memVal; }
+                    swprintf(newValueStr, 64, L"%u", memVal);
+                }
+            }
+            break;
+            case DATA_4BYTE:
+            {
+                uint32_t memVal = 0;
+                if (ReadProcessMemory(hProcess, (LPCVOID)saved.entry.address, &memVal, sizeof(memVal), NULL))
+                {
+                    if (saved.freeze) { WriteProcessMemory(hProcess, (LPVOID)saved.entry.address, &saved.entry.value.val4Byte, sizeof(uint32_t), NULL); memVal = saved.entry.value.val4Byte; }
+                    else if (memVal != saved.entry.value.val4Byte) { saved.entry.value.val4Byte = memVal; }
+                    swprintf(newValueStr, 64, L"%u", memVal);
+                }
+            }
+            break;
+            case DATA_8BYTE:
+            {
+                uint64_t memVal = 0;
+                if (ReadProcessMemory(hProcess, (LPCVOID)saved.entry.address, &memVal, sizeof(memVal), NULL))
+                {
+                    if (saved.freeze) { WriteProcessMemory(hProcess, (LPVOID)saved.entry.address, &saved.entry.value.val8Byte, sizeof(uint64_t), NULL); memVal = saved.entry.value.val8Byte; }
+                    else if (memVal != saved.entry.value.val8Byte) { saved.entry.value.val8Byte = memVal; }
+                    swprintf(newValueStr, 64, L"%llu", memVal);
+                }
+            }
+            break;
+            case DATA_FLOAT:
+            {
+                float memVal = 0;
+                if (ReadProcessMemory(hProcess, (LPCVOID)saved.entry.address, &memVal, sizeof(memVal), NULL))
+                {
+                    if (saved.freeze) { WriteProcessMemory(hProcess, (LPVOID)saved.entry.address, &saved.entry.value.valFloat, sizeof(float), NULL); memVal = saved.entry.value.valFloat; }
+                    else if (fabs(memVal - saved.entry.value.valFloat) > epsilon_float) { saved.entry.value.valFloat = memVal; }
+                    swprintf(newValueStr, 64, L"%.4f", memVal);
+                }
+            }
+            break;
+            case DATA_DOUBLE:
+            {
+                double memVal = 0;
+                if (ReadProcessMemory(hProcess, (LPCVOID)saved.entry.address, &memVal, sizeof(memVal), NULL))
+                {
+                    if (saved.freeze) { WriteProcessMemory(hProcess, (LPVOID)saved.entry.address, &saved.entry.value.valDouble, sizeof(double), NULL); memVal = saved.entry.value.valDouble; }
+                    else if (fabs(memVal - saved.entry.value.valDouble) > epsilon_double) { saved.entry.value.valDouble = memVal; }
+                    swprintf(newValueStr, 64, L"%.4f", memVal);
+                }
+            }
+            break;
+            default:
+                swprintf(newValueStr, 64, L"Unknown");
+                break;
+            }
+            ListView_SetItemText(g_hListSavedAddresses, (int)i, 4, newValueStr);
+        }
+    }
+    return 0;
+}
+
+static LRESULT Handle_Notify(HWND hWnd, WPARAM wParam, LPARAM lParam)
+{
+    NMHDR* pnmh = (NMHDR*)lParam;
+
+    if (pnmh->idFrom == IDC_LIST_SCANRESULTS)
+    {
+        if (pnmh->code == NM_CUSTOMDRAW)
+        {
+            LPNMLVCUSTOMDRAW cd = (LPNMLVCUSTOMDRAW)lParam;
+            switch (cd->nmcd.dwDrawStage)
+            {
+            case CDDS_PREPAINT:
+                return CDRF_NOTIFYITEMDRAW;
+            case CDDS_ITEMPREPAINT:
+            {
+                int idx = (int)cd->nmcd.dwItemSpec;
+                if (idx >= 0 && idx < (int)g_itemChanged.size() && g_itemChanged[idx])
+                    cd->clrText = RGB(255, 0, 0);
+            }
+            return CDRF_DODEFAULT;
+            default:
+                return CDRF_DODEFAULT;
+            }
+        }
+        else if (pnmh->code == NM_DBLCLK)
+        {
+            LPNMITEMACTIVATE act = (LPNMITEMACTIVATE)lParam;
+            int iItem = act->iItem;
+            if (iItem >= 0 && iItem < (int)g_lastDisplayedEntries.size())
+            {
+                SavedEntry saved{};
+                saved.freeze = false;
+                saved.entry = g_lastDisplayedEntries[iItem];
+                saved.savedType = g_lastDisplayedEntries[iItem].dataType;
+                g_savedEntries.push_back(saved);
+                AppendSavedAddress(saved);
+            }
+        }
+    }
+    else if (pnmh->idFrom == IDC_LIST_SAVEDADDR)
+    {
+        if (pnmh->code == LVN_ITEMCHANGED)
+        {
+            NMLISTVIEW* lvl = (NMLISTVIEW*)lParam;
+            if (lvl->uChanged & LVIF_STATE)
+            {
+                if (lvl->uNewState & LVIS_SELECTED)
+                {
+                    g_pointerScanTargetIndex = lvl->iItem;
+
+                    SavedEntry& s = g_savedEntries[g_pointerScanTargetIndex];
+                    wchar_t buf[32];
+                    swprintf(buf, 32, L"%llX", (unsigned long long)s.entry.address);
+                    SetWindowTextW(g_hDynamicAddressEdit, buf);
+                }
+                BOOL chk = ListView_GetCheckState(g_hListSavedAddresses, lvl->iItem);
+                g_savedEntries[lvl->iItem].freeze = (chk != FALSE);
+
+                if (lvl->uNewState & LVIS_SELECTED)
+                {
+                    int baseLen = GetWindowTextLengthW(g_hEditBaseAddress);
+                    if (baseLen > 0)
+                    {
+                        SavedEntry& s = g_savedEntries[lvl->iItem];
+                        wchar_t buf[32];
+                        swprintf(buf, 32, L"%llX", (unsigned long long)s.entry.address);
+                        SetWindowTextW(g_hDynamicAddressEdit, buf);
+                    }
+                }
+            }
+        }
+        else if (pnmh->code == NM_CLICK)
+        {
+            LPNMITEMACTIVATE act = (LPNMITEMACTIVATE)lParam;
+            RECT rcDel;
+            if (ListView_GetSubItemRect(g_hListSavedAddresses, act->iItem, 5, LVIR_BOUNDS, &rcDel))
+            {
+                if (act->ptAction.x >= rcDel.left && act->ptAction.x <= rcDel.right)
+                {
+                    g_savedEntries.erase(g_savedEntries.begin() + act->iItem);
+                    ListView_DeleteItem(g_hListSavedAddresses, act->iItem);
+                    AdjustSavedListColumns();
+                }
+            }
+        }
+        else if (pnmh->code == NM_DBLCLK)
+        {
+            LPNMITEMACTIVATE act = (LPNMITEMACTIVATE)lParam;
+            int iItem = act->iItem;
+            if (iItem < 0 || iItem >= (int)g_savedEntries.size())
+                return 0;
+
+            POINT pt = act->ptAction;
+            RECT itemRc;
+            ListView_GetItemRect(g_hListSavedAddresses, iItem, &itemRc, LVIR_BOUNDS);
+
+            int colCount = 6;
+            int x = itemRc.left;
+            for (int col = 0; col < colCount; ++col)
+            {
+                LV_COLUMN lvc = { LVCF_WIDTH };
+                ListView_GetColumn(g_hListSavedAddresses, col, &lvc);
+                int colLeft = x, colRight = x + lvc.cx;
+
+                if (pt.x >= colLeft && pt.x <= colRight)
+                {
+                    if (col == 2)
+                    {
+                        ShowEditAddressDialog(hWnd, iItem);
+                    }
+                    else if (col == 1 || col == 4)
+                    {
+                        RECT subRc;
+                        if (ListView_GetSubItemRect(g_hListSavedAddresses, iItem, col, LVIR_BOUNDS, &subRc))
+                        {
+                            wchar_t txt[256] = { 0 };
+                            ListView_GetItemText(g_hListSavedAddresses, iItem, col, txt, _countof(txt));
+
+                            g_hSubItemEdit = CreateWindowExW(
+                                WS_EX_CLIENTEDGE, L"EDIT", txt,
+                                WS_CHILD | WS_BORDER | WS_VISIBLE | ES_AUTOHSCROLL,
+                                subRc.left, subRc.top,
+                                subRc.right - subRc.left,
+                                subRc.bottom - subRc.top,
+                                g_hListSavedAddresses, (HMENU)1000,
+                                GetModuleHandleW(NULL), NULL
+                            );
+                            SubclassEditControl(g_hSubItemEdit);
+                            g_editingItem = iItem;
+                            g_editingSubItem = col;
+                            SetFocus(g_hSubItemEdit);
+                            SendMessage(g_hSubItemEdit, EM_SETSEL, 0, -1);
+                        }
+                    }
+                    break;
+                }
+                x = colRight;
+            }
+        }
+    }
+
+    return 0;
+}
+
+static LRESULT Handle_Command(HWND hWnd, WPARAM wParam, LPARAM lParam)
+{
+    int wmId = LOWORD(wParam);
+    int wmEvent = HIWORD(wParam);
+
+    if (wmId == IDC_COMBO_SEARCHMODE && wmEvent == CBN_SELCHANGE)
+    {
+        HWND hComboSearchMode = GetDlgItem(hWnd, IDC_COMBO_SEARCHMODE);
+        LRESULT sel = SendMessage(hComboSearchMode, CB_GETCURSEL, 0, 0);
+        if (sel >= 3 && sel <= 6)
+        {
+            EnableWindow(g_hEditValue, FALSE);
+            SetWindowText(g_hEditValue, L"");
+        }
+        else
+        {
+            EnableWindow(g_hEditValue, TRUE);
+        }
+    }
+
+    switch (wmId)
+    {
+    case IDC_BTN_FIRSTSCAN:
+    {
+        wchar_t buffer[256] = {};
+        GetWindowText(g_hEditValue, buffer, 256);
+
+        int modeSel = (int)SendMessageW(
+            GetDlgItem(hWnd, IDC_COMBO_SEARCHMODE),
+            CB_GETCURSEL, 0, 0);
+
+        static const wchar_t* modeNames[] = {
+            L"Exact Value", L"Bigger Than", L"Smaller Than",
+            L"Unknown Initial Value", L"Increased Value",
+            L"Decreased Value",   L"Unchanged Value"
+        };
+        const wchar_t* modeName = (modeSel >= 0 && modeSel < _countof(modeNames))
+            ? modeNames[modeSel]
+            : L"Invalid Mode";
+
+        int selIndex = (int)SendMessageW(g_hComboValueType, CB_GETCURSEL, 0, 0);
+        DataType dt = static_cast<DataType>(selIndex);
+
+        {
+            std::wstring logLine =
+                L"First Scan:\r\n"
+                L"  Value = \"" + std::wstring(buffer) + L"\"\r\n"
+                L"  Type = " + DataTypeToString(dt) + L"\r\n"
+                L"  Mode = " + modeName + L"\r\n\r\n";
+            Log(logLine.c_str());
+            RedrawWindow(g_hOutputLog, NULL, NULL, RDW_INVALIDATE | RDW_UPDATENOW);
+        }
+
+        SearchMode searchMode = SEARCH_EXACT;
+        switch (modeSel) {
+        case 0: searchMode = SEARCH_EXACT;          break;
+        case 1: searchMode = SEARCH_BIGGER;         break;
+        case 2: searchMode = SEARCH_SMALLER;        break;
+        case 6: searchMode = SEARCH_UNKNOWN_INITIAL; break;
+        default:
+            MessageBox(g_hWndMain,
+                L"Only 'Exact', 'Bigger', 'Smaller' or 'Unknown Initial' are allowed for first scan.",
+                L"Error", MB_OK | MB_ICONERROR);
+            return 0;
+        }
+
+        if (searchMode != SEARCH_UNKNOWN_INITIAL && buffer[0] == L'\0')
+        {
+            MessageBox(g_hWndMain, L"A value must be entered to scan.",
+                L"Error", MB_OK | MB_ICONERROR);
+            break;
+        }
+
+        double searchVal = 0;
+        if (searchMode != SEARCH_UNKNOWN_INITIAL)
+            GetSearchValueFromEdit(searchVal);
+
+        PerformFirstScan(searchVal, dt, searchMode);
+        EnableWindow(g_hBtnFirstScan, FALSE);
+        EnableWindow(g_hComboValueType, FALSE);
+        {
+            HWND hComboSearch = GetDlgItem(g_hWndMain, IDC_COMBO_SEARCHMODE);
+            int idx = (int)SendMessageW(hComboSearch,
+                CB_FINDSTRINGEXACT,
+                (WPARAM)-1,
+                (LPARAM)L"Unknown Initial Value");
+            if (idx != CB_ERR)
+                SendMessageW(hComboSearch, CB_DELETESTRING, (WPARAM)idx, 0);
+        }
+    }
+    break;
+
+    case IDC_BTN_NEXTSCAN:
+    {
+        wchar_t buffer[256] = {};
+        GetWindowText(g_hEditValue, buffer, 256);
+
+        int modeSel = (int)SendMessageW(
+            GetDlgItem(hWnd, IDC_COMBO_SEARCHMODE),
+            CB_GETCURSEL, 0, 0);
+
+        static const wchar_t* modeNames[] = {
+            L"Exact Value", L"Bigger Than", L"Smaller Than",
+            L"Unknown Initial Value", L"Increased Value",
+            L"Decreased Value",   L"Unchanged Value"
+        };
+        const wchar_t* modeName = (modeSel >= 0 && modeSel < _countof(modeNames))
+            ? modeNames[modeSel]
+            : L"Invalid Mode";
+
+        SearchMode searchMode;
+        switch (modeSel)
+        {
+        case 0: searchMode = SEARCH_EXACT;     break;
+        case 1: searchMode = SEARCH_BIGGER;    break;
+        case 2: searchMode = SEARCH_SMALLER;   break;
+        case 4: searchMode = SEARCH_INCREASED; break;
+        case 5: searchMode = SEARCH_DECREASED; break;
+        case 6: searchMode = SEARCH_UNCHANGED; break;
+        default:
+            MessageBox(g_hWndMain, L"Invalid search mode.", L"Error", MB_OK | MB_ICONERROR);
+            return 0;
+        }
+
+        int selIndex = (int)SendMessageW(g_hComboValueType, CB_GETCURSEL, 0, 0);
+        DataType dt = static_cast<DataType>(selIndex);
+
+        {
+            std::wstring logLine =
+                L"Next Scan:\r\n"
+                L"  Value = \"" + std::wstring(buffer) + L"\"\r\n"
+                L"  Type = " + DataTypeToString(dt) + L"\r\n"
+                L"  Mode = " + modeName + L"\r\n\r\n";
+            Log(logLine.c_str());
+            RedrawWindow(g_hOutputLog, NULL, NULL, RDW_INVALIDATE | RDW_UPDATENOW);
+        }
+
+        if ((searchMode == SEARCH_INCREASED ||
+            searchMode == SEARCH_DECREASED ||
+            searchMode == SEARCH_UNCHANGED) &&
+            g_scanPager->Count() == 0)
+        {
+            MessageBox(g_hWndMain,
+                L"You must perform a first scan before this mode.",
+                L"Error", MB_OK | MB_ICONERROR);
+            break;
+        }
+
+        double searchVal = 0;
+        if (searchMode == SEARCH_EXACT ||
+            searchMode == SEARCH_BIGGER ||
+            searchMode == SEARCH_SMALLER)
+        {
+            if (buffer[0] == L'\0')
+            {
+                MessageBox(g_hWndMain,
+                    L"A value must be entered to scan.",
+                    L"Error", MB_OK | MB_ICONERROR);
+                break;
+            }
+            GetSearchValueFromEdit(searchVal);
+        }
+
+        SendMessage(g_hProgressBar, PBM_SETMARQUEE, TRUE, 30);
+        UpdateWindow(g_hProgressBar);
+
+        MSG msg;
+        g_previousScanEntries.clear();
+        for (size_t i = 0, tot = g_scanPager->Count(); i < tot; ++i)
+        {
+            ScanEntry e;
+            if (g_scanPager->GetEntry(i, e))
+                g_previousScanEntries.push_back(e);
+
+            if ((i % 1000) == 0)
+            {
+                while (PeekMessage(&msg, NULL, 0, 0, PM_REMOVE))
+                {
+                    TranslateMessage(&msg);
+                    DispatchMessage(&msg);
+                }
+            }
+        }
+
+        SendMessage(g_hProgressBar, PBM_SETMARQUEE, FALSE, 0);
+        SendMessage(g_hProgressBar, PBM_SETPOS, 0, 0);
+        UpdateWindow(g_hProgressBar);
+
+        PerformNextScan(searchVal, dt, searchMode);
+    }
+    break;
+
+    case IDC_BTN_UNDOSCAN:
+        if (UndoScan()) UpdateScanResultsListView();
+        break;
+
+    case IDC_BTN_NEWSCAN:
+        ResetScans();
+
+        {
+            int totalLen = GetWindowTextLengthW(g_hOutputLog);
+            std::vector<wchar_t> buf(totalLen + 1);
+            GetWindowTextW(g_hOutputLog, buf.data(), totalLen + 1);
+            std::wstring logText(buf.data());
+
+            if (g_unrealDetected) {
+                size_t pos = logText.find(L"First Scan:");
+                if (pos != std::wstring::npos) {
+                    SendMessageW(g_hOutputLog, EM_SETSEL, pos, totalLen);
+                    SendMessageW(g_hOutputLog, EM_REPLACESEL, FALSE, (LPARAM)L"");
+                }
+            }
+            else {
+                size_t attachPos = logText.rfind(L"Attached to");
+                if (attachPos != std::wstring::npos) {
+                    size_t cut = logText.find(L"\r\n\r\n", attachPos);
+                    if (cut != std::wstring::npos) {
+                        std::wstring keep = logText.substr(0, cut + 4);
+                        SetWindowTextW(g_hOutputLog, keep.c_str());
+                    }
+                    else {
+                        SetWindowTextW(g_hOutputLog, logText.c_str());
+                    }
+                }
+                else {
+                    SetWindowTextW(g_hOutputLog, L"MemRE Logs:\r\n\r\n");
+                }
+            }
+        }
+
+        SetWindowTextW(g_hStaticScanStatus, L"Displaying 0 values out of 0");
+        SendMessageW(g_hProgressBar, PBM_SETPOS, 0, 0);
+        SendMessageW(g_hOutputLog, WM_VSCROLL, SB_LINEUP, 0);
+        SendMessageW(g_hOutputLog, WM_VSCROLL, SB_LINEUP, 0);
+        UpdateScanButtons(false);
+        EnableWindow(g_hBtnFirstScan, TRUE);
+        EnableWindow(g_hComboValueType, TRUE);
+        {
+            HWND hComboSearch = GetDlgItem(g_hWndMain, IDC_COMBO_SEARCHMODE);
+            int count = (int)SendMessageW(hComboSearch, CB_GETCOUNT, 0, 0);
+            SendMessageW(hComboSearch,
+                CB_INSERTSTRING,
+                (WPARAM)count,
+                (LPARAM)L"Unknown Initial Value");
+        }
+        break;
+
+    case IDC_BTN_EXIT:
+    {
+        ResetScans();
+        CleanupDatFiles(g_scanResultsFolder);
+        WCHAR procName[MAX_PATH] = {};
+        DWORD size = MAX_PATH;
+        if (QueryFullProcessImageNameW(GetCurrentProcess(), 0, procName, &size))
+        {
+            WCHAR* baseName = wcsrchr(procName, L'\\');
+            baseName = baseName ? baseName + 1 : procName;
+            if (_wcsicmp(baseName, L"MemRE.exe") == 0)
+                TerminateProcess(GetCurrentProcess(), 0);
+        }
+        DestroyWindow(hWnd);
+    }
+    break;
+    case IDC_BTN_SAVETABLE:
+    {
+        OPENFILENAMEW ofn{ sizeof(ofn) };
+        wchar_t szFile[MAX_PATH] = { 0 };
+        std::wstring defaultPath = g_tablesFolder + L"\\";
+        if (g_isAttached && g_hTargetProcess) {
+            wchar_t fullPath[MAX_PATH] = { 0 };
+            DWORD sz = MAX_PATH;
+            if (QueryFullProcessImageNameW(g_hTargetProcess, 0, fullPath, &sz)) {
+                wchar_t* base = wcsrchr(fullPath, L'\\');
+                base = base ? base + 1 : fullPath;
+                if (wcsstr(base, L".exe")) *wcsstr(base, L".exe") = L'\0';
+                defaultPath += base;
+            }
+            else defaultPath += L"table";
+        }
+        else defaultPath += L"table";
+        defaultPath += L".mre";
+        wcscpy_s(szFile, defaultPath.c_str());
+        ofn.hwndOwner = hWnd;
+        ofn.lpstrFilter = L"MemRE Tables (*.mre)\0*.mre\0All Files\0*.*\0\0";
+        ofn.lpstrFile = szFile;
+        ofn.nMaxFile = MAX_PATH;
+        ofn.lpstrDefExt = L"mre";
+        ofn.Flags = OFN_OVERWRITEPROMPT | OFN_PATHMUSTEXIST;
+
+        if (GetSaveFileNameW(&ofn)) {
+            std::wofstream out(ofn.lpstrFile);
+            if (!out) {
+                MessageBoxW(hWnd, L"Cannot open for writing.", L"Error", MB_OK | MB_ICONERROR);
+            }
+            else {
+                for (auto& s : g_savedEntries) {
+                    std::wstring safeDesc = s.desc;
+                    for (auto& c : safeDesc)
+                        if (c == L',') c = L' ';
+
+                    wchar_t addrBuf[32];
+                    swprintf(addrBuf, 32, L"%llX", (unsigned long long)s.entry.address);
+
+                    std::wstring typeTok = std::to_wstring((int)s.savedType);
+
+                    std::wstring valTok;
+                    switch (s.savedType) {
+                    case DATA_BYTE:   valTok = std::to_wstring(s.entry.value.valByte);   break;
+                    case DATA_2BYTE:  valTok = std::to_wstring(s.entry.value.val2Byte);  break;
+                    case DATA_4BYTE:  valTok = std::to_wstring(s.entry.value.val4Byte);  break;
+                    case DATA_8BYTE:  valTok = std::to_wstring(s.entry.value.val8Byte);  break;
+                    case DATA_FLOAT:  valTok = std::to_wstring(s.entry.value.valFloat);  break;
+                    case DATA_DOUBLE: valTok = std::to_wstring(s.entry.value.valDouble); break;
+                    default:          valTok = L"0";                                      break;
+                    }
+
+                    std::wstring ptrTok = s.pointerExpr;
+
+                    out
+                        << addrBuf << L","
+                        << typeTok << L","
+                        << L"" << L","
+                        << L"0" << L","
+                        << safeDesc << L","
+                        << ptrTok << L"\n";
+                }
+                out.close();
+            }
+        }
+    }
+    break;
+    case IDC_BTN_LOADTABLE:
+    {
+        OPENFILENAMEW ofn{ sizeof(ofn) };
+        wchar_t szFile[MAX_PATH] = { 0 };
+        wcscpy_s(szFile, (g_tablesFolder + L"\\*.mre").c_str());
+
+        ofn.hwndOwner = hWnd;
+        ofn.lpstrFilter = L"MemRE Tables (*.mre)\0*.mre\0All Files\0*.*\0\0";
+        ofn.lpstrFile = szFile;
+        ofn.nMaxFile = MAX_PATH;
+        ofn.lpstrDefExt = L"mre";
+        ofn.Flags = OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST;
+
+        if (GetOpenFileNameW(&ofn)) {
+            LoadTableFromFile(ofn.lpstrFile);
+        }
+    }
+    break;
+    case IDC_BTN_ADDADDRESS:
+        ShowAddAddressDialog(hWnd);
+        break;
+    case IDC_BTN_SAVECT:
+    {
+        CreateDirectoryW(g_tablesFolder.c_str(), nullptr);
+
+        OPENFILENAMEW ofn{ sizeof(ofn) };
+        wchar_t szFile[MAX_PATH] = { 0 };
+        std::wstring defaultName = g_tablesFolder + L"\\";
+        if (g_isAttached && g_hTargetProcess) {
+            wchar_t fullPath[MAX_PATH] = { 0 };
+            DWORD sz = MAX_PATH;
+            if (QueryFullProcessImageNameW(g_hTargetProcess, 0, fullPath, &sz)) {
+                wchar_t* base = wcsrchr(fullPath, L'\\');
+                base = base ? base + 1 : fullPath;
+                wchar_t* dot = wcsstr(base, L".exe");
+                if (dot) *dot = L'\0';
+                defaultName += base;
+            }
+            else {
+                defaultName += L"table";
+            }
+        }
+        else {
+            defaultName += L"table";
+        }
+        defaultName += L".CT";
+        wcscpy_s(szFile, defaultName.c_str());
+
+        ofn.hwndOwner = hWnd;
+        ofn.lpstrFilter = L"Cheat Engine Tables (*.ct)\0*.ct\0All Files\0*.*\0\0";
+        ofn.lpstrFile = szFile;
+        ofn.nMaxFile = MAX_PATH;
+        ofn.lpstrDefExt = L"ct";
+        ofn.Flags = OFN_OVERWRITEPROMPT | OFN_PATHMUSTEXIST;
+
+        if (GetSaveFileNameW(&ofn)) {
+            std::wofstream out(ofn.lpstrFile);
+            if (!out) {
+                MessageBoxW(hWnd, L"Cannot open file for writing.", L"Error", MB_OK | MB_ICONERROR);
+            }
+            else {
+                out << L"<?xml version=\"1.0\" encoding=\"utf-8\"?>\n";
+                out << L"<CheatTable CheatEngineTableVersion=\"45\">\n";
+                out << L"  <CheatEntries>\n";
+
+                for (size_t i = 0; i < g_savedEntries.size(); ++i) {
+                    const auto& s = g_savedEntries[i];
+                    out << L"    <CheatEntry>\n";
+                    out << L"      <ID>" << i << L"</ID>\n";
+
+                    std::wstring desc = s.desc.empty() ? L"N/A" : s.desc;
+                    for (auto& c : desc) if (c == L'"') c = L'\'';
+                    out << L"      <Description>\"" << desc << L"\"</Description>\n";
+
+                    out << L"      <ShowAsSigned>0</ShowAsSigned>\n";
+                    out << L"      <VariableType>" << DataTypeToString(s.savedType) << L"</VariableType>\n";
+
+                    if (!s.pointerExpr.empty()) {
+                        std::vector<std::wstring> parts;
+                        {
+                            std::wistringstream ss(s.pointerExpr);
+                            std::wstring tok;
+                            while (std::getline(ss, tok, L',')) {
+                                parts.push_back(trim(tok));
+                            }
+                        }
+                        out << L"      <Address>" << parts[0] << L"</Address>\n";
+
+                        if (parts.size() > 1) {
+                            out << L"      <Offsets>\n";
+                            for (int idx = (int)parts.size() - 1; idx >= 1; --idx) {
+                                out << L"        <Offset>" << parts[idx] << L"</Offset>\n";
+                            }
+                            out << L"      </Offsets>\n";
+                        }
+                    }
+                    else {
+                        wchar_t addrBuf[32];
+                        swprintf(addrBuf, 32, L"%llX", (unsigned long long)s.entry.address);
+                        out << L"      <Address>" << addrBuf << L"</Address>\n";
+                    }
+
+                    out << L"    </CheatEntry>\n";
+                }
+
+                out << L"  </CheatEntries>\n";
+                out << L"  <UserdefinedSymbols/>\n";
+                out << L"</CheatTable>\n";
+                out.close();
+            }
+        }
+    }
+    break;
+
+    case IDC_BTN_OFFSET_ADD:
+    {
+        wchar_t buf[64] = {};
+        GetWindowTextW(g_hEditOffsetEntry, buf, _countof(buf));
+        if (buf[0]) {
+            SendMessageW(g_hListOffsets, LB_ADDSTRING, 0, (LPARAM)buf);
+            SetWindowTextW(g_hEditOffsetEntry, L"");
+            int cnt = (int)SendMessageW(g_hListOffsets, LB_GETCOUNT, 0, 0);
+            SendMessageW(g_hListOffsets, LB_SETTOPINDEX, cnt - 1, 0);
+        }
+        break;
+    }
+
+    case IDC_BTN_OFFSET_DEL:
+    {
+        int sel = (int)SendMessageW(g_hListOffsets, LB_GETCURSEL, 0, 0);
+        if (sel != LB_ERR)
+            SendMessageW(g_hListOffsets, LB_DELETESTRING, sel, 0);
+        break;
+    }
+
+    case IDC_BTN_OFFSET_AUTO:
+    {
+        ShowAutoOffsetsDialog(hWnd, g_resolvedBaseAddress);
+        break;
+    }
+    case IDC_BTN_POINTERSCAN:
+    {
+        if (!g_isPointerScanning)
+        {
+            // if "Scan From File" is checked
+            if (IsDlgButtonChecked(hWnd, IDC_CHECK_SCAN_SAVED_FILE) == BST_CHECKED)
+            {
+                // enter scanning state
+                g_isPointerScanning = true;
+                SetWindowTextW(g_hBtnPointerScan, L"Stop");
+
+                // disable UI controls during "scan from file"
+                EnableWindow(g_hEditBaseAddress, FALSE);
+                EnableWindow(g_hDynamicAddressEdit, FALSE);
+                EnableWindow(g_hEditMaxDepth, FALSE);
+                EnableWindow(g_hListOffsets, FALSE);
+                EnableWindow(g_hBtnAddOffset, FALSE);
+                EnableWindow(g_hBtnRemoveOffset, FALSE);
+                EnableWindow(g_hBtnAutoOffset, FALSE);
+                EnableWindow(GetDlgItem(hWnd, IDC_CHECK_SCAN_SAVED_FILE), FALSE);
+
+                // perform filtering of loaded chains
+                std::vector<std::vector<std::wstring>> active;
+                for (auto& chain : g_loadedChains)
+                {
+                    // pass both process handle and PID to match signature
+                    uintptr_t addr = ResolvePointerChain(
+                        g_hTargetProcess,
+                        g_targetProcessId,
+                        chain
+                    );
+                    if (addr != 0)
+                        active.push_back(chain);
+                }
+
+                // prompt user to save survivors
+                int total = (int)g_loadedChains.size();
+                int kept = (int)active.size();
+                std::wstring msg =
+                    L"Of " + std::to_wstring(total) +
+                    L" saved chains, " + std::to_wstring(kept) +
+                    L" are still active.\n\nSave active chains?";
+                if (MessageBoxW(hWnd, msg.c_str(), L"Scan From File",
+                    MB_YESNO | MB_ICONQUESTION) == IDYES)
+                {
+                    // default output path = original + "_active.MPTR"
+                    std::wstring base = g_mptrFilePath.substr(
+                        0, g_mptrFilePath.find_last_of(L'.')
+                    ) + L"_active.MPTR";
+
+                    wchar_t outFile[MAX_PATH];
+                    wcscpy_s(outFile, base.c_str());
+                    OPENFILENAMEW sfn{ sizeof(sfn) };
+                    sfn.hwndOwner = hWnd;
+                    sfn.lpstrFilter = L"Pointer files (*.MPTR)\0*.MPTR\0\0";
+                    sfn.lpstrFile = outFile;
+                    sfn.nMaxFile = MAX_PATH;
+                    sfn.lpstrDefExt = L"MPTR";
+                    sfn.Flags = OFN_OVERWRITEPROMPT | OFN_PATHMUSTEXIST;
+                    if (GetSaveFileNameW(&sfn))
+                    {
+                        std::wofstream fout(sfn.lpstrFile, std::ios::trunc);
+                        for (auto& chain : active)
+                        {
+                            fout << chain[0];
+                            for (size_t i = 1; i < chain.size(); ++i)
+                                fout << L"," << chain[i];
+                            fout << L"\n";
+                        }
+                    }
+                }
+
+                // restore UI and state
+                g_loadedChains.clear();
+                g_mptrFilePath.clear();
+                g_isPointerScanning = false;
+                SetWindowTextW(g_hBtnPointerScan, L"Scan");
+                CheckDlgButton(hWnd, IDC_CHECK_SCAN_SAVED_FILE, BST_UNCHECKED);
+                EnableWindow(g_hEditBaseAddress, TRUE);
+                EnableWindow(g_hDynamicAddressEdit, TRUE);
+                EnableWindow(g_hEditMaxDepth, TRUE);
+                EnableWindow(g_hListOffsets, TRUE);
+                EnableWindow(g_hBtnAddOffset, TRUE);
+                EnableWindow(g_hBtnRemoveOffset, TRUE);
+                EnableWindow(g_hBtnAutoOffset, TRUE);
+                EnableWindow(GetDlgItem(hWnd, IDC_CHECK_SCAN_SAVED_FILE), TRUE);
+                SendMessage(g_hProgressBar, PBM_SETMARQUEE, FALSE, 0);
+            }
+            else
+            {
+                g_stopPointerScan = false;
+                g_isPointerScanning = true;
+                SetWindowTextW(g_hBtnPointerScan, L"Stop");
+
+                EnableWindow(g_hEditBaseAddress, FALSE);
+                EnableWindow(g_hDynamicAddressEdit, FALSE);
+                EnableWindow(g_hEditMaxDepth, FALSE);
+                EnableWindow(g_hListOffsets, FALSE);
+                EnableWindow(g_hBtnAddOffset, FALSE);
+                EnableWindow(g_hBtnRemoveOffset, FALSE);
+                EnableWindow(g_hBtnAutoOffset, FALSE);
+                EnableWindow(GetDlgItem(hWnd, IDC_CHECK_SCAN_SAVED_FILE), FALSE);
+
+                wchar_t baseBuf[64] = { 0 };
+                GetWindowTextW(g_hEditBaseAddress, baseBuf, _countof(baseBuf));
+                std::wstring baseStr(baseBuf);
+                uintptr_t baseAddr = ParsePointerAddress(baseStr);
+                if (!baseAddr)
+                {
+                    Log(L"Error: could not parse base address\r\n\r\n");
+
+                    // abort and restore UI
+                    g_isPointerScanning = false;
+                    SetWindowTextW(g_hBtnPointerScan, L"Scan");
+                    EnableWindow(g_hEditBaseAddress, TRUE);
+                    EnableWindow(g_hDynamicAddressEdit, TRUE);
+                    EnableWindow(g_hEditMaxDepth, TRUE);
+                    EnableWindow(g_hListOffsets, TRUE);
+                    EnableWindow(g_hBtnAddOffset, TRUE);
+                    EnableWindow(g_hBtnRemoveOffset, TRUE);
+                    EnableWindow(g_hBtnAutoOffset, TRUE);
+                    EnableWindow(GetDlgItem(hWnd, IDC_CHECK_SCAN_SAVED_FILE), TRUE);
+                    SendMessage(g_hProgressBar, PBM_SETMARQUEE, FALSE, 0);
+                    break;
+                }
+
+                wchar_t dynBuf[64] = { 0 };
+                GetWindowTextW(g_hDynamicAddressEdit, dynBuf, _countof(dynBuf));
+                std::wstring dynStr(dynBuf);
+                uintptr_t dynAddr = ParsePointerAddress(dynStr);
+                if (!dynAddr)
+                {
+                    Log(L"Error: could not parse dynamic address\r\n");
+                    break;
+                }
+
+                // read the max‑depth out of its edit box
+                wchar_t depthBuf[16] = { 0 };
+                GetWindowTextW(g_hEditMaxDepth, depthBuf, _countof(depthBuf));
+                int maxDepth = _wtoi(depthBuf);
+
+                g_positionalOffsets.clear();
+                int count = (int)SendMessageW(g_hListOffsets, LB_GETCOUNT, 0, 0);
+                for (int i = 0; i < count; ++i)
+                {
+                    wchar_t buf[32] = {};
+                    SendMessageW(g_hListOffsets, LB_GETTEXT, i, (LPARAM)buf);
+                    DWORD_PTR off = static_cast<DWORD_PTR>(_wcstoui64(buf, nullptr, 16));
+                    g_positionalOffsets.push_back(off);
+                }
+
+                // kick off the pointer‑scan thread
+                auto* sp = new PointerScanParams{
+                    baseAddr,
+                    dynAddr,
+                    maxDepth
+                };
+                g_hPointerScanThread = CreateThread(
+                    nullptr, 0,
+                    PointerScanThreadProc,
+                    sp, 0, nullptr
+                );
+
+                // put the progress bar into marquee mode.. ON HOLD WHAT A JOKE
+                // SendMessage(g_hProgressBar, PBM_SETMARQUEE, TRUE, 30);
+            }
+        }
+        else
+        {
+            // user clicked “Stop”
+            g_stopPointerScan = true;
+        }
+        break;
+    }
+    case IDC_CHECK_SCAN_SAVED_FILE:
+        if (HIWORD(wParam) == BN_CLICKED &&
+            IsDlgButtonChecked(hWnd, IDC_CHECK_SCAN_SAVED_FILE) == BST_CHECKED)
+        {
+            // 1) Prompt user to select an existing .MPTR file
+            wchar_t inFile[MAX_PATH] = {};
+            OPENFILENAMEW ofn{ sizeof(ofn) };
+            ofn.hwndOwner = hWnd;
+            ofn.lpstrFilter = L"Pointer files (*.MPTR)\0*.MPTR\0All Files\0*.*\0\0";
+            ofn.lpstrFile = inFile;
+            ofn.nMaxFile = MAX_PATH;
+            ofn.Flags = OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST;
+            if (!GetOpenFileNameW(&ofn)) {
+                // User cancelled: reset checkbox and exit
+                CheckDlgButton(hWnd, IDC_CHECK_SCAN_SAVED_FILE, BST_UNCHECKED);
+                break;
+            }
+
+            // 2) Remember path and load pointer chains into memory
+            g_mptrFilePath = inFile;
+            g_loadedChains.clear();
+            std::wifstream fin(inFile);
+            std::wstring line;
+            while (std::getline(fin, line)) {
+                if (line.empty())
+                    continue;
+                g_loadedChains.push_back(splitPointerExpr(line));
+            }
+
+        }
+        break;
+
+    case IDC_BTN_VIEWPTRS:
+    {
+        // 1) Prompt for an existing .MPTR file
+        wchar_t szFile[MAX_PATH] = {};
+        OPENFILENAMEW ofn{ sizeof(ofn) };
+        ofn.hwndOwner = g_hWndMain;
+        ofn.lpstrFilter = L"Pointer files (*.MPTR)\0*.MPTR\0All Files\0*.*\0\0";
+        ofn.lpstrFile = szFile;
+        ofn.nMaxFile = MAX_PATH;
+        ofn.Flags = OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST;
+        if (!GetOpenFileNameW(&ofn))
+            break;
+
+        // 2) Load each comma‑delimited chain into g_loadedChains
+        g_mptrFilePath = szFile;
+        g_loadedChains.clear();
+        std::wifstream fin(szFile);
+        std::wstring  line;
+        while (std::getline(fin, line))
+            if (!line.empty())
+                g_loadedChains.push_back(splitPointerExpr(line));
+
+        // 3) Show the pointer‑table dialog
+        ShowPointerTableDialog(g_hWndMain);
+    }
+    break;
+
+    case ID_MENU_ATTACH:
+    {
+        HMENU hMenu = GetMenu(hWnd);
+        MENUITEMINFO mii = { sizeof(mii) };
+        mii.fMask = MIIM_STRING;
+
+        if (!g_isAttached)
+        {
+            g_targetPID = 0;
+            SelectProcessDialog(hWnd);
+            if (g_targetPID)
+                AttachToProcess(g_targetPID);
+        }
+        else
+        {
+            DWORD oldPID = g_targetProcessId;
+            WCHAR procPath[MAX_PATH] = {};
+            DWORD sz = MAX_PATH;
+            if (QueryFullProcessImageNameW(g_hTargetProcess, 0, procPath, &sz))
+            {
+                WCHAR* exeName = wcsrchr(procPath, L'\\');
+                exeName = exeName ? exeName + 1 : procPath;
+                std::wstring line =
+                    L"Detached from " +
+                    std::wstring(exeName) +
+                    L" (PID: " +
+                    std::to_wstring(oldPID) +
+                    L")\r\n\r\n";
+                Log(line.c_str());
+            }
+
+            if (g_hTargetProcess && g_hTargetProcess != GetCurrentProcess())
+                CloseHandle(g_hTargetProcess);
+
+            g_hTargetProcess = g_hOriginalProcess;
+            g_targetProcessId = g_originalProcessId;
+            g_isAttached = false;
+
+            HMENU hMenu = GetMenu(hWnd);
+            MENUITEMINFO mii = { sizeof(mii) };
+            mii.fMask = MIIM_STRING;
+            mii.dwTypeData = const_cast<LPWSTR>(L"Attach");
+            SetMenuItemInfoW(hMenu, ID_MENU_ATTACH, FALSE, &mii);
+
+            WCHAR myPath[MAX_PATH];
+            DWORD mySz = GetModuleFileNameW(NULL, myPath, MAX_PATH);
+            WCHAR* myExe = wcsrchr(myPath, L'\\');
+            myExe = myExe ? myExe + 1 : myPath;
+            WCHAR info[128];
+            swprintf_s(info, _countof(info), L"%s (PID: %lu)", myExe, g_originalProcessId);
+            MENUITEMINFO miiInfo = { sizeof(miiInfo) };
+            miiInfo.fMask = MIIM_STRING;
+            miiInfo.dwTypeData = info;
+            SetMenuItemInfoW(hMenu, ID_MENU_PROCINFO, FALSE, &miiInfo);
+
+            DrawMenuBar(hWnd);
+            EnableWindow(g_hBtnAutoOffset, FALSE);
+        }
+        break;
+    }
+    case ID_MENU_THREAD:
+    {
+        g_targetPID = 0;
+
+        wchar_t origBaseText[64] = {};
+        GetWindowTextW(g_hEditBaseAddress, origBaseText, _countof(origBaseText));
+        uintptr_t origResolved = g_resolvedBaseAddress;
+
+        SelectProcessDialog(hWnd);
+        if (!g_targetPID)
+            break;
+
+        // Inject
+        InjectSelfIntoProcess(g_targetPID);
+
+        // Open the log with injection info:
+        {
+            HANDLE hProc = OpenProcess(
+                PROCESS_QUERY_INFORMATION | PROCESS_VM_READ,
+                FALSE,
+                g_targetPID
+            );
+            if (hProc)
+            {
+                // figure out the exe name
+                wchar_t fullPath[MAX_PATH]{};
+                DWORD len = MAX_PATH;
+                QueryFullProcessImageNameW(hProc, 0, fullPath, &len);
+                wchar_t* exePtr = wcsrchr(fullPath, L'\\');
+                const wchar_t* exeName = exePtr ? exePtr + 1 : fullPath;
+
+                // grab module base
+                HMODULE hMods[1];
+                DWORD cbNeeded = 0;
+                if (EnumProcessModules(hProc, hMods, sizeof(hMods), &cbNeeded))
+                {
+                    MODULEINFO mi{};
+                    if (GetModuleInformation(hProc, hMods[0], &mi, sizeof(mi)))
+                    {
+                        wchar_t buf[64];
+                        swprintf(buf, 64,
+                            L"Base Address: 0x%llX\r\n\r\n",
+                            (unsigned long long)mi.lpBaseOfDll);
+                        // Log(buf);
+
+                         // also update the base‑address edit
+                        wchar_t editBuf[32];
+                        swprintf(editBuf, 32,
+                            L"%llX",
+                            (unsigned long long)mi.lpBaseOfDll);
+                        SetWindowTextW(g_hEditBaseAddress, editBuf);
+                        g_resolvedBaseAddress = (uintptr_t)mi.lpBaseOfDll;
+                    }
+                }
+                CloseHandle(hProc);
+            }
+        }
+
+        SetWindowTextW(g_hEditBaseAddress, origBaseText);
+        g_resolvedBaseAddress = origResolved;
+
+        // make sure the log actually redraws immediately
+        RedrawWindow(g_hOutputLog, nullptr, nullptr, RDW_INVALIDATE | RDW_UPDATENOW);
+    }
+    break;
+    default:
+        return DefWindowProcW(hWnd, WM_COMMAND, wParam, lParam);
+    }
+    return 0;
+}
+
+static LRESULT Handle_Destroy(HWND hWnd)
+{
+    KillTimer(hWnd, IDT_UPDATE_TIMER);
+    PostQuitMessage(0);
+    return 0;
+}
 
 // — Other Helpers
 bool IsReadable(DWORD protect)
@@ -2084,36 +3901,6 @@ static LRESULT CALLBACK BaseAddrEditProc(HWND hWnd, UINT msg, WPARAM wParam, LPA
     return CallWindowProcW(g_oldBaseAddrProc, hWnd, msg, wParam, lParam);
 }
 
-
-//===========================================================================
-// UI Fonts
-//===========================================================================
-HFONT hHeaderFont = CreateFontW(
-    -12, 0, 0, 0,
-    FW_BOLD, FALSE, FALSE, FALSE,
-    DEFAULT_CHARSET, OUT_DEFAULT_PRECIS,
-    CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
-    VARIABLE_PITCH | FF_SWISS,
-    L"Segoe UI"
-);
-
-HFONT hSmallFont = CreateFontW(
-    -10, 0, 0, 0,
-    FW_BOLD, FALSE, FALSE, FALSE,
-    DEFAULT_CHARSET, OUT_DEFAULT_PRECIS,
-    CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
-    VARIABLE_PITCH | FF_SWISS,
-    L"Segoe UI"
-);
-
-HFONT hFont = CreateFontW(
-    16, 0, 0, 0, FW_SEMIBOLD,
-    FALSE, FALSE, FALSE,
-    DEFAULT_CHARSET, OUT_DEFAULT_PRECIS,
-    CLIP_DEFAULT_PRECIS, DEFAULT_QUALITY,
-    DEFAULT_PITCH | FF_SWISS, L"Segoe UI"
-);
-
 //===========================================================================
 // UI Helpers
 //===========================================================================
@@ -2263,97 +4050,6 @@ void ResolvePendingSavedEntries()
 //===========================================================================
 // Scanning Engine
 //===========================================================================
-class ScanResultPager {
-public:
-    ScanResultPager(const std::wstring& folder, size_t pageSizeEntries, int scanId)
-        : m_folder(folder), m_pageSize(pageSizeEntries), m_totalEntries(0), m_scanId(scanId)
-    {
-        CreateNewPage();
-    }
-    ~ScanResultPager()
-    {
-        for (auto& page : m_pages)
-        {
-            if (page.data) UnmapViewOfFile(page.data);
-            if (page.hMap) CloseHandle(page.hMap);
-            if (page.hFile != INVALID_HANDLE_VALUE) CloseHandle(page.hFile);
-            DeleteFileW(page.filePath.c_str());
-        }
-        m_pages.clear();
-    }
-    void Append(const ScanEntry& entry)
-    {
-        if (m_pages.empty() || m_pages.back().count >= m_pageSize)
-        {
-            if (!CreateNewPage())
-                return;
-        }
-        MappedPage& page = m_pages.back();
-        page.data[page.count] = entry;
-        page.count++;
-        m_totalEntries++;
-    }
-    bool GetEntry(size_t index, ScanEntry& entry) const
-    {
-        if (index >= m_totalEntries)
-            return false;
-        size_t pageIndex = index / m_pageSize;
-        size_t indexInPage = index % m_pageSize;
-        entry = m_pages[pageIndex].data[indexInPage];
-        return true;
-    }
-    size_t Count() const { return m_totalEntries; }
-private:
-    struct MappedPage {
-        HANDLE hFile;
-        HANDLE hMap;
-        ScanEntry* data;
-        size_t count;
-        std::wstring filePath;
-    };
-    bool CreateNewPage()
-    {
-        MappedPage page = { 0 };
-        page.count = 0;
-        std::wstringstream ss;
-        ss << m_folder << L"\\scan_page_" << m_scanId << L"_" << m_pages.size() << L".dat";
-        page.filePath = ss.str();
-        HANDLE hFile = CreateFileW(page.filePath.c_str(), GENERIC_READ | GENERIC_WRITE,
-            0, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
-        if (hFile == INVALID_HANDLE_VALUE)
-            return false;
-        page.hFile = hFile;
-        LARGE_INTEGER liSize;
-        liSize.QuadPart = m_pageSize * sizeof(ScanEntry);
-        if (!SetFilePointerEx(hFile, liSize, NULL, FILE_BEGIN) || !SetEndOfFile(hFile))
-        {
-            CloseHandle(hFile);
-            return false;
-        }
-        HANDLE hMap = CreateFileMappingW(hFile, NULL, PAGE_READWRITE, 0, 0, NULL);
-        if (hMap == NULL)
-        {
-            CloseHandle(hFile);
-            return false;
-        }
-        page.hMap = hMap;
-        ScanEntry* pData = (ScanEntry*)MapViewOfFile(hMap, FILE_MAP_ALL_ACCESS, 0, 0, m_pageSize * sizeof(ScanEntry));
-        if (pData == NULL)
-        {
-            CloseHandle(hMap);
-            CloseHandle(hFile);
-            return false;
-        }
-        page.data = pData;
-        m_pages.push_back(page);
-        return true;
-    }
-    std::wstring m_folder;
-    size_t m_pageSize;
-    size_t m_totalEntries;
-    int m_scanId;
-    std::vector<MappedPage> m_pages;
-};
 
 bool PerformFirstScan(double searchVal, DataType dt, SearchMode searchMode)
 {
@@ -3797,1657 +5493,29 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
     switch (message)
     {
     case WM_COPYDATA:
-    {
-        PCOPYDATASTRUCT cds = (PCOPYDATASTRUCT)lParam;
-        if (cds->dwData == 1 && cds->lpData) {
-            LPCWSTR path = (LPCWSTR)cds->lpData;
-            LoadTableFromFile(path);
-        }
-        return TRUE;
-    }
+        return Handle_CopyData(hWnd, lParam);
+
     case WM_CTLCOLORSTATIC:
-    {
-        HDC hdcStatic = (HDC)wParam;
-        SetBkMode(hdcStatic, TRANSPARENT);
-        return (LRESULT)(GetSysColorBrush(COLOR_WINDOW));
-    }
+        return Handle_CtlColorStatic(wParam, lParam);
+
     case WM_CREATE:
-    {
-        HMENU hMenu = CreateMenu();
-        MENUITEMINFO mii = { sizeof(mii) };
+        return Handle_Create(hWnd, lParam);
 
-        mii.fMask = MIIM_FTYPE | MIIM_ID | MIIM_STRING;
-        mii.fType = MFT_STRING;
-        mii.wID = ID_MENU_ATTACH;
-        mii.dwTypeData = const_cast<LPWSTR>(L"Attach");
-        InsertMenuItemW(hMenu, 0, TRUE, &mii);
-
-        mii.fMask = MIIM_FTYPE | MIIM_ID | MIIM_STRING;
-        mii.fType = MFT_STRING;
-        mii.wID = ID_MENU_THREAD;
-        mii.dwTypeData = const_cast<LPWSTR>(L"Inject");
-        InsertMenuItemW(hMenu, 1, TRUE, &mii);
-
-        mii.fMask = MIIM_FTYPE | MIIM_ID | MIIM_STRING;
-        mii.fType = MFT_STRING | MFT_RIGHTJUSTIFY;
-        mii.wID = ID_MENU_PROCINFO;
-        mii.dwTypeData = const_cast<LPWSTR>(L"");
-        InsertMenuItemW(hMenu, 2, TRUE, &mii);
-
-        SetMenu(hWnd, hMenu);
-
-        {
-            wchar_t fullPath[MAX_PATH] = {};
-            DWORD   len = MAX_PATH;
-            if (QueryFullProcessImageNameW(
-                GetCurrentProcess(),
-                0,
-                fullPath,
-                &len
-            ))
-            {
-                wchar_t* exeName = wcsrchr(fullPath, L'\\');
-                exeName = exeName ? exeName + 1 : fullPath;
-
-                wchar_t info[128];
-                swprintf(info, 128, L"%s (PID: %lu)",
-                    exeName,
-                    GetCurrentProcessId());
-
-                MENUITEMINFO miiInfo = { sizeof(miiInfo) };
-                miiInfo.fMask = MIIM_STRING;
-                miiInfo.dwTypeData = info;
-                SetMenuItemInfoW(hMenu, ID_MENU_PROCINFO, FALSE, &miiInfo);
-                DrawMenuBar(hWnd);
-            }
-        }
-
-        HINSTANCE hInst = ((LPCREATESTRUCT)lParam)->hInstance;
-
-        g_hStaticScanStatus = CreateWindowExW(
-            WS_EX_CLIENTEDGE, L"STATIC", L"Displaying 0 values out of 0",
-            WS_CHILD | WS_VISIBLE, 10, 10, 450, 25,
-            hWnd, (HMENU)IDC_STATIC_SCANSTATUS, hInst, NULL
-        );
-        g_hProgressBar = CreateWindowExW(
-            0, PROGRESS_CLASS, NULL,
-            WS_CHILD | WS_VISIBLE, 10, 40, 450, 20,
-            hWnd, (HMENU)IDC_PROGRESS_BAR, hInst, NULL
-        );
-
-        g_hListScanResults = CreateWindowExW(
-            WS_EX_CLIENTEDGE, WC_LISTVIEW, L"",
-            WS_CHILD | WS_VISIBLE | LVS_REPORT | LVS_SINGLESEL,
-            10, 65, 450, 235,
-            hWnd, (HMENU)IDC_LIST_SCANRESULTS, hInst, NULL
-        );
-        ListView_SetExtendedListViewStyle(
-            g_hListScanResults,
-            ListView_GetExtendedListViewStyle(g_hListScanResults)
-            | LVS_EX_DOUBLEBUFFER
-        );
-        {
-            LVCOLUMN col = { LVCF_TEXT | LVCF_WIDTH };
-            col.pszText = const_cast<LPWSTR>(L"Address");  col.cx = 150;
-            ListView_InsertColumn(g_hListScanResults, 0, &col);
-            col.pszText = const_cast<LPWSTR>(L"Value");    col.cx = 100;
-            ListView_InsertColumn(g_hListScanResults, 1, &col);
-            col.pszText = const_cast<LPWSTR>(L"Previous"); col.cx = 100;
-            ListView_InsertColumn(g_hListScanResults, 2, &col);
-            col.pszText = const_cast<LPWSTR>(L"First");    col.cx = 96;
-            ListView_InsertColumn(g_hListScanResults, 3, &col);
-        }
-
-        g_hListSavedAddresses = CreateWindowExW(
-            WS_EX_CLIENTEDGE, WC_LISTVIEW, L"",
-            WS_CHILD | WS_VISIBLE | LVS_REPORT | LVS_SINGLESEL,
-            10, 305, 450, 165,
-            hWnd, (HMENU)IDC_LIST_SAVEDADDR, hInst, NULL
-        );
-        DWORD ex = ListView_GetExtendedListViewStyle(g_hListSavedAddresses);
-        ListView_SetExtendedListViewStyle(
-            g_hListSavedAddresses,
-            ex
-            | LVS_EX_CHECKBOXES
-            | LVS_EX_FULLROWSELECT
-            | LVS_EX_DOUBLEBUFFER
-        );
-        {
-            LVCOLUMN col = { LVCF_TEXT | LVCF_WIDTH };
-            col.pszText = const_cast<LPWSTR>(L"Freeze");     col.cx = 50;
-            ListView_InsertColumn(g_hListSavedAddresses, 0, &col);
-            col.pszText = const_cast<LPWSTR>(L"Description"); col.cx = 126;
-            ListView_InsertColumn(g_hListSavedAddresses, 1, &col);
-            col.pszText = const_cast<LPWSTR>(L"Address");    col.cx = 100;
-            ListView_InsertColumn(g_hListSavedAddresses, 2, &col);
-            col.pszText = const_cast<LPWSTR>(L"Type");       col.cx = 70;
-            ListView_InsertColumn(g_hListSavedAddresses, 3, &col);
-            col.pszText = const_cast<LPWSTR>(L"Value");      col.cx = 70;
-            ListView_InsertColumn(g_hListSavedAddresses, 4, &col);
-            col.pszText = const_cast<LPWSTR>(L"Del");        col.cx = 30;
-            ListView_InsertColumn(g_hListSavedAddresses, 5, &col);
-        }
-
-        const int btnX = 480, btnY = 10, btnW = 100, btnH = 25, gap = 10;
-        g_hBtnFirstScan = CreateWindowW(
-            L"BUTTON", L"First Scan",
-            WS_TABSTOP | WS_VISIBLE | WS_CHILD | BS_DEFPUSHBUTTON | BS_FLAT,
-            btnX, btnY, btnW, btnH, hWnd, (HMENU)IDC_BTN_FIRSTSCAN, hInst, NULL
-        );
-        g_hBtnNextScan = CreateWindowW(
-            L"BUTTON", L"Next Scan",
-            WS_TABSTOP | WS_VISIBLE | WS_CHILD | BS_DEFPUSHBUTTON | BS_FLAT,
-            btnX + 1 * (btnW + gap), btnY, btnW, btnH, hWnd, (HMENU)IDC_BTN_NEXTSCAN, hInst, NULL
-        );
-        g_hBtnUndoScan = CreateWindowW(
-            L"BUTTON", L"Undo Scan",
-            WS_TABSTOP | WS_VISIBLE | WS_CHILD | BS_DEFPUSHBUTTON | BS_FLAT,
-            btnX + 2 * (btnW + gap), btnY, btnW, btnH, hWnd, (HMENU)IDC_BTN_UNDOSCAN, hInst, NULL
-        );
-        g_hBtnNewScan = CreateWindowW(
-            L"BUTTON", L"New Scan",
-            WS_TABSTOP | WS_VISIBLE | WS_CHILD | BS_DEFPUSHBUTTON | BS_FLAT,
-            btnX + 3 * (btnW + gap), btnY, btnW, btnH, hWnd, (HMENU)IDC_BTN_NEWSCAN, hInst, NULL
-        );
-
-        int addY = btnY + btnH + 10 + 300 - (btnH + 10);
-        HWND hBtnAddAddress = CreateWindowW(
-            L"BUTTON", L"Add Address",
-            WS_TABSTOP | WS_VISIBLE | WS_CHILD | BS_DEFPUSHBUTTON | BS_FLAT,
-            btnX, addY, btnW, btnH, hWnd, (HMENU)IDC_BTN_ADDADDRESS, hInst, NULL
-        );
-
-        const int verticalPadding = 5;
-        int lblY = btnY + btnH + 10 + verticalPadding;
-        HWND hLblValue = CreateWindowExW(
-            0, L"STATIC", L"Value:",
-            WS_CHILD | WS_VISIBLE | SS_LEFT,
-            btnX, lblY, 60, 20,
-            hWnd, NULL, hInst, NULL
-        );
-        SendMessageW(hLblValue, WM_SETFONT, (WPARAM)hFont, TRUE);
-
-        int editW = 4 * btnW + 3 * gap;
-        int editY = lblY + 20;
-        g_hEditValue = CreateWindowExW(
-            WS_EX_CLIENTEDGE, L"EDIT", L"",
-            WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL,
-            btnX, editY, editW, 25, hWnd, (HMENU)IDC_EDIT_VALUE, hInst, NULL
-        );
-
-        int comboY = editY + 25 + 5;
-        const int comboW = 210, comboH = 100;
-        g_hComboValueType = CreateWindowExW(
-            WS_EX_CLIENTEDGE, L"COMBOBOX", L"",
-            WS_CHILD | WS_VISIBLE | CBS_DROPDOWNLIST,
-            btnX, comboY, comboW, comboH, hWnd, (HMENU)IDC_COMBO_VALUETYPE, hInst, NULL
-        );
-        for (auto* s : { L"Byte",L"2 Byte",L"4 Byte",L"8 Byte",L"Float",L"Double" })
-            SendMessageW(g_hComboValueType, CB_ADDSTRING, 0, (LPARAM)s);
-        SendMessageW(g_hComboValueType, CB_SETCURSEL, 2, 0);
-
-        HWND hComboSearch = CreateWindowExW(
-            WS_EX_CLIENTEDGE, L"COMBOBOX", L"",
-            WS_CHILD | WS_VISIBLE | CBS_DROPDOWNLIST,
-            btnX + comboW + gap, comboY, comboW, comboH, hWnd, (HMENU)IDC_COMBO_SEARCHMODE, hInst, NULL
-        );
-        for (auto* s : { L"Exact Value",L"Bigger Than",L"Smaller Than",
-                         L"Increased Value", L"Decreased Value",
-                         L"Unchanged Value", L"Unknown Initial Value" })
-            SendMessageW(hComboSearch, CB_ADDSTRING, 0, (LPARAM)s);
-        SendMessageW(hComboSearch, CB_SETCURSEL, 0, 0);
-
-        int frameY = comboY + comboH - 65;
-        HWND g_hChainFrame = CreateWindowExW(
-            0, L"STATIC", NULL,
-            WS_CHILD | WS_VISIBLE | SS_BLACKFRAME,
-            btnX, frameY, editW, 160,
-            hWnd, (HMENU)IDC_CHAIN_FRAME, hInst, NULL
-        );
-        SendMessageW(g_hChainFrame, WM_SETFONT, (WPARAM)hSmallFont, TRUE);
-
-        SIZE hdrSz;
-        {
-            HDC hdc = GetDC(hWnd);
-            HFONT oldF = (HFONT)SelectObject(hdc, hSmallFont);
-            GetTextExtentPoint32W(hdc, L"Pointer Scanner", lstrlenW(L"Pointer Scanner"), &hdrSz);
-            SelectObject(hdc, oldF);
-            ReleaseDC(hWnd, hdc);
-        }
-
-        int textY = frameY - (hdrSz.cy / 2);
-        HWND hLblBase = CreateWindowW(
-            L"STATIC", L"Pointer Scanner",
-            WS_CHILD | WS_VISIBLE | SS_LEFT,
-            btnX + 8, textY,
-            hdrSz.cx, hdrSz.cy,
-            hWnd, NULL, hInst, NULL
-        );
-        SendMessageW(hLblBase, WM_SETFONT, (WPARAM)hSmallFont, TRUE);
-
-        int groupX = btnX + 256;
-        int margin = 4;
-        int offsX = groupX + margin;
-
-        HDC hdc2 = GetDC(hWnd);
-        HFONT oldF2 = (HFONT)SelectObject(hdc2, hSmallFont);
-        GetTextExtentPoint32W(
-            hdc2,
-            L"Positional Offsets",
-            lstrlenW(L"Positional Offsets"),
-            &hdrSz
-        );
-        SelectObject(hdc2, oldF2);
-        ReleaseDC(hWnd, hdc2);
-
-        HWND hLblOffsets = CreateWindowW(
-            L"STATIC", L"Positional Offsets",
-            WS_CHILD | WS_VISIBLE | SS_LEFT,
-            offsX, textY,
-            hdrSz.cx, hdrSz.cy,
-            hWnd, NULL, hInst, NULL
-        );
-        SendMessageW(hLblOffsets, WM_SETFONT, (WPARAM)hSmallFont, TRUE);
-
-        int newAddY = frameY + 160 + 10;
-        SetWindowPos(hBtnAddAddress, NULL, btnX, newAddY, 0, 0, SWP_NOSIZE | SWP_NOZORDER);
-
-        int labelX = btnX + 8;
-        int labelW = 75;
-        int labelGap = 1;
-        int editX = labelX + labelW + labelGap;
-
-        CreateWindowW(L"STATIC", L"Base Addr:",
-            WS_CHILD | WS_VISIBLE | SS_LEFT,
-            labelX, frameY + 18, labelW, 20,
-            hWnd, (HMENU)IDC_STATIC_BASE_ADDRESS, hInst, NULL);
-
-        g_hEditBaseAddress = CreateWindowExW(
-            WS_EX_CLIENTEDGE, L"EDIT", L"",
-            WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL,
-            editX, frameY + 16, 160, 24,
-            hWnd, (HMENU)IDC_EDIT_BASE_ADDRESS, hInst, NULL);
-        g_oldBaseAddrProc = (WNDPROC)SetWindowLongPtrW(
-            g_hEditBaseAddress,
-            GWLP_WNDPROC,
-            (LONG_PTR)BaseAddrEditProc
-        );
-
-        CreateWindowW(L"STATIC", L"Dyn Addr:",
-            WS_CHILD | WS_VISIBLE | SS_LEFT,
-            labelX, frameY + 16 + 32, labelW, 20,
-            hWnd, (HMENU)IDC_STATIC_DYNAMIC_ADDRESS, hInst, NULL);
-
-        g_hDynamicAddressEdit = CreateWindowExW(
-            WS_EX_CLIENTEDGE, L"EDIT", L"",
-            WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL,
-            editX, frameY + 14 + 32, 160, 24,
-            hWnd, (HMENU)IDC_EDIT_DYNAMIC_ADDRESS, hInst, NULL);
-
-        CreateWindowW(L"STATIC", L"Max Depth:",
-            WS_CHILD | WS_VISIBLE | SS_LEFT,
-            labelX, frameY + 16 + 62, labelW, 20,
-            hWnd, (HMENU)IDC_STATIC_MAXDEPTH, hInst, NULL);
-
-        for (int id : { IDC_STATIC_BASE_ADDRESS,
-            IDC_STATIC_DYNAMIC_ADDRESS,
-            IDC_STATIC_MAXDEPTH })
-        {
-            HWND hLbl = GetDlgItem(hWnd, id);
-            SendMessageW(hLbl, WM_SETFONT, (WPARAM)hHeaderFont, TRUE);
-        }
-
-        g_hEditMaxDepth = CreateWindowExW(
-            WS_EX_CLIENTEDGE, L"EDIT", L"3",
-            WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL,
-            editX, frameY + 15 + 60, 40, 24,
-            hWnd, (HMENU)IDC_EDIT_MAXDEPTH, hInst, NULL);
-
-        // Checkbox: “Scan From Saved File”  
-        HWND hChkSaved = CreateWindowW(
-            L"BUTTON", L"Scan From File",
-            WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX,
-            editX + 55,
-            frameY + 17 + 60,         
-            110, 20,
-            hWnd, (HMENU)IDC_CHECK_SCAN_SAVED_FILE, hInst, NULL);
-        SendMessageW(hChkSaved, WM_SETFONT, (WPARAM)hSmallFont, TRUE);
-
-        g_hBtnPointerScan = CreateWindowW(
-            L"BUTTON", L"Scan",
-            WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON | BS_FLAT,
-            editX - 60, frameY + 116, 90, 28,
-            hWnd, (HMENU)IDC_BTN_POINTERSCAN, hInst, NULL);
-        SendMessageW(g_hBtnPointerScan, WM_SETFONT, (WPARAM)hHeaderFont, TRUE);
-
-        g_hBtnViewPTRs = CreateWindowW(
-            L"BUTTON", L"View PTRs",
-            WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON | BS_FLAT,
-            editX + 50, frameY + 116,
-            90, 28,
-            hWnd, (HMENU)IDC_BTN_VIEWPTRS, hInst, NULL);
-        SendMessageW(g_hBtnViewPTRs, WM_SETFONT, (WPARAM)hHeaderFont, TRUE);
-
-        int groupY = frameY + 1;
-        int groupW = 167;
-        int groupH = 153;
-
-        {
-            const int margin = 4;
-            const int titleH = 16;
-            const int listX = groupX + margin;
-            const int listY = groupY + margin + titleH - 5;
-            const int listW = groupW - margin * 2;
-            const int listH = 70 + 17;
-            g_hListOffsets = CreateWindowExW(
-                WS_EX_CLIENTEDGE, WC_LISTBOX, L"",
-                WS_CHILD | WS_VISIBLE | LBS_NOTIFY | WS_VSCROLL,
-                listX, listY, listW, listH,
-                hWnd, (HMENU)IDC_LIST_OFFSETS, hInst, NULL
-            );
-            g_oldOffsetsProc = (WNDPROC)SetWindowLongPtrW(
-                g_hListOffsets,
-                GWLP_WNDPROC,
-                (LONG_PTR)OffsetsListProc
-            );
-
-            const int editH = 24;
-            const int editY = listY + listH + margin - 4;
-            g_hEditOffsetEntry = CreateWindowExW(
-                WS_EX_CLIENTEDGE, L"EDIT", L"",
-                WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL,
-                listX, editY, listW, editH,
-                hWnd, (HMENU)IDC_EDIT_OFFSETNEW, hInst, NULL
-            );
-
-            g_oldOffsetEditProc = (WNDPROC)SetWindowLongPtrW(
-                g_hEditOffsetEntry,
-                GWLP_WNDPROC,
-                (LONG_PTR)EditOffsetProc
-            );
-
-            const int btnH = 22;
-            const int btnW = 50;
-            const int btnGap = 5;
-            const int btnY2 = editY + editH + 4;
-            g_hBtnAddOffset = CreateWindowW(
-                L"BUTTON", L"Add",
-                WS_CHILD | WS_VISIBLE,
-                listX, btnY2, btnW, btnH,
-                hWnd, (HMENU)IDC_BTN_OFFSET_ADD, hInst, NULL
-            );
-            g_hBtnRemoveOffset = CreateWindowW(
-                L"BUTTON", L"Del",
-                WS_CHILD | WS_VISIBLE,
-                listX + btnW + btnGap, btnY2, btnW, btnH,
-                hWnd, (HMENU)IDC_BTN_OFFSET_DEL, hInst, NULL
-            );
-            g_hBtnAutoOffset = CreateWindowW(
-                L"BUTTON", L"Auto",
-                WS_CHILD | WS_VISIBLE,
-                listX + 2 * (btnW + btnGap),
-                btnY2, btnW, btnH,
-                hWnd, (HMENU)IDC_BTN_OFFSET_AUTO, hInst, NULL
-            );
-            EnableWindow(g_hBtnAutoOffset, FALSE);
-            SendMessageW(g_hBtnAddOffset, WM_SETFONT, (WPARAM)hHeaderFont, TRUE);
-            SendMessageW(g_hBtnRemoveOffset, WM_SETFONT, (WPARAM)hHeaderFont, TRUE);
-            SendMessageW(g_hBtnAutoOffset, WM_SETFONT, (WPARAM)hHeaderFont, TRUE);
-        }
-
-        const int subGap = 5;
-        HWND hBtnSaveTable = CreateWindowW(
-            L"BUTTON", L"Save Table",
-            WS_TABSTOP | WS_VISIBLE | WS_CHILD | BS_DEFPUSHBUTTON | BS_FLAT,
-            btnX, newAddY + (btnH + subGap) * 1, btnW, btnH,
-            hWnd, (HMENU)IDC_BTN_SAVETABLE, hInst, NULL
-        );
-        HWND hBtnLoadTable = CreateWindowW(
-            L"BUTTON", L"Load Table",
-            WS_TABSTOP | WS_VISIBLE | WS_CHILD | BS_DEFPUSHBUTTON | BS_FLAT,
-            btnX, newAddY + (btnH + subGap) * 2, btnW, btnH,
-            hWnd, (HMENU)IDC_BTN_LOADTABLE, hInst, NULL
-        );
-        HWND hBtnSaveCT = CreateWindowW(
-            L"BUTTON", L"Save as .CT",
-            WS_TABSTOP | WS_VISIBLE | WS_CHILD | BS_DEFPUSHBUTTON | BS_FLAT,
-            btnX, newAddY + (btnH + subGap) * 3, btnW, btnH,
-            hWnd, (HMENU)IDC_BTN_SAVECT, hInst, NULL
-        );
-
-        const int exitGap = 20;
-        int exitY = newAddY + (btnH + subGap) * 4 + exitGap;
-
-        HWND hBtnExit = CreateWindowW(
-            L"BUTTON", L"Exit",
-            WS_TABSTOP | WS_VISIBLE | WS_CHILD | BS_DEFPUSHBUTTON | BS_FLAT,
-            btnX, exitY, btnW, btnH,
-            hWnd, (HMENU)IDC_BTN_EXIT, hInst, NULL
-        );
-
-        int logX = btnX + btnW + gap;
-        int logY = newAddY;
-        int logW = 320, logH = 165;
-
-        g_hOutputLog = CreateWindowExW(
-            WS_EX_CLIENTEDGE, L"EDIT", L"MemRE Logs:\r\n\r\n",
-            WS_CHILD | WS_VISIBLE | ES_MULTILINE | ES_AUTOVSCROLL | WS_VSCROLL | ES_READONLY | ES_NOHIDESEL,
-            logX, logY, logW, logH,
-            hWnd, (HMENU)IDC_EDIT_LOG, hInst, NULL
-        );
-        g_oldLogProc = (WNDPROC)SetWindowLongPtrW(g_hOutputLog, GWLP_WNDPROC, (LONG_PTR)LogEditProc);
-
-
-        HWND ctrls[] = {
-            (HWND)g_hEditValue, g_hComboValueType, hComboSearch,
-            g_hBtnFirstScan, g_hBtnNextScan, g_hBtnUndoScan, g_hBtnNewScan,
-            hBtnAddAddress, hBtnSaveTable, hBtnLoadTable, hBtnSaveCT,
-            hBtnExit, g_hOutputLog, g_hEditBaseAddress, g_hDynamicAddressEdit,
-            g_hEditMaxDepth, g_hEditOffsetEntry, g_hBtnAutoOffset, g_hBtnViewPTRs
-        };
-        for (HWND ctrl : ctrls)
-            SendMessageW(ctrl, WM_SETFONT, (WPARAM)hFont, TRUE);
-
-        SendMessageW(g_hListOffsets, WM_SETFONT, (WPARAM)hFont, TRUE);
-        SetWindowTheme(g_hListScanResults, L"Explorer", NULL);
-        SetWindowTheme(g_hListSavedAddresses, L"Explorer", NULL);
-        SetTimer(hWnd, IDT_UPDATE_TIMER, UPDATE_INTERVAL_MS, NULL);
-        UpdateScanButtons(false);
-    }
-    break;
     case WM_TIMER:
-    {
-        if (g_hPointerScanThread &&
-            WaitForSingleObject(g_hPointerScanThread, 0) == WAIT_OBJECT_0)
-        {
-            CloseHandle(g_hPointerScanThread);
-            g_hPointerScanThread = nullptr;
-            g_isPointerScanning = false;
-            SetWindowTextW(g_hBtnPointerScan, L"Scan");
+        return Handle_Timer(hWnd);
 
-            EnableWindow(g_hEditBaseAddress, TRUE);
-            EnableWindow(g_hDynamicAddressEdit, TRUE);
-            EnableWindow(g_hEditMaxDepth, TRUE);
-            EnableWindow(g_hListOffsets, TRUE);
-            EnableWindow(g_hBtnAddOffset, TRUE);
-            EnableWindow(g_hBtnRemoveOffset, TRUE);
-            EnableWindow(g_hBtnAutoOffset, TRUE);
-            EnableWindow(GetDlgItem(hWnd, IDC_CHECK_SCAN_SAVED_FILE), TRUE);
-        }
-
-        if (!g_savedEntries.empty()) {
-            ResolvePendingSavedEntries();
-        }
-        if (!g_lastDisplayedEntries.empty())
-        {
-            HANDLE hProcess = g_hTargetProcess;
-            for (size_t i = 0; i < g_lastDisplayedEntries.size(); i++)
-            {
-                ScanEntry oldCurrent = g_lastDisplayedEntries[i];
-                ScanEntry newEntry = oldCurrent;
-                bool updated = false;
-                if (newEntry.dataType == DATA_BYTE)
-                {
-                    uint8_t val = 0;
-                    if (ReadProcessMemory(hProcess, (LPCVOID)newEntry.address, &val, sizeof(val), NULL))
-                        if (val != oldCurrent.value.valByte) { newEntry.value.valByte = val; updated = true; }
-                }
-                else if (newEntry.dataType == DATA_2BYTE)
-                {
-                    uint16_t val = 0;
-                    if (ReadProcessMemory(hProcess, (LPCVOID)newEntry.address, &val, sizeof(val), NULL))
-                        if (val != oldCurrent.value.val2Byte) { newEntry.value.val2Byte = val; updated = true; }
-                }
-                else if (newEntry.dataType == DATA_4BYTE)
-                {
-                    uint32_t val = 0;
-                    if (ReadProcessMemory(hProcess, (LPCVOID)newEntry.address, &val, sizeof(val), NULL))
-                        if (val != oldCurrent.value.val4Byte) { newEntry.value.val4Byte = val; updated = true; }
-                }
-                else if (newEntry.dataType == DATA_8BYTE)
-                {
-                    uint64_t val = 0;
-                    if (ReadProcessMemory(hProcess, (LPCVOID)newEntry.address, &val, sizeof(val), NULL))
-                        if (val != oldCurrent.value.val8Byte) { newEntry.value.val8Byte = val; updated = true; }
-                }
-                else if (newEntry.dataType == DATA_FLOAT)
-                {
-                    float val = 0;
-                    if (ReadProcessMemory(hProcess, (LPCVOID)newEntry.address, &val, sizeof(val), NULL))
-                        if (fabs(val - oldCurrent.value.valFloat) > epsilon_float) { newEntry.value.valFloat = val; updated = true; }
-                }
-                else if (newEntry.dataType == DATA_DOUBLE)
-                {
-                    double val = 0;
-                    if (ReadProcessMemory(hProcess, (LPCVOID)newEntry.address, &val, sizeof(val), NULL))
-                        if (fabs(val - oldCurrent.value.valDouble) > epsilon_double) { newEntry.value.valDouble = val; updated = true; }
-                }
-                if (updated)
-                {
-                    wchar_t currStr[64] = { 0 };
-                    switch (newEntry.dataType)
-                    {
-                    case DATA_BYTE:   swprintf(currStr, 64, L"%u", newEntry.value.valByte); break;
-                    case DATA_2BYTE:  swprintf(currStr, 64, L"%u", newEntry.value.val2Byte); break;
-                    case DATA_4BYTE:  swprintf(currStr, 64, L"%u", newEntry.value.val4Byte); break;
-                    case DATA_8BYTE:  swprintf(currStr, 64, L"%llu", newEntry.value.val8Byte); break;
-                    case DATA_FLOAT:  swprintf(currStr, 64, L"%.4f", newEntry.value.valFloat); break;
-                    case DATA_DOUBLE: swprintf(currStr, 64, L"%.4f", newEntry.value.valDouble); break;
-                    default: swprintf(currStr, 64, L"Unknown"); break;
-                    }
-                    ListView_SetItemText(g_hListScanResults, (int)i, 1, currStr);
-                    g_itemChanged[i] = true;
-                    g_lastDisplayedEntries[i] = newEntry;
-                }
-            }
-            InvalidateRect(g_hListScanResults, NULL, TRUE);
-        }
-        if (g_isAttached)
-        {
-            DWORD exitCode = 0;
-            if (GetExitCodeProcess(g_hTargetProcess, &exitCode) && exitCode != STILL_ACTIVE)
-            {
-                DWORD oldPID = g_targetProcessId;
-                CloseHandle(g_hTargetProcess);
-
-                g_hTargetProcess = GetCurrentProcess();
-                g_targetProcessId = GetCurrentProcessId();
-                g_isAttached = false;
-
-                HMENU hMenu = GetMenu(hWnd);
-                MENUITEMINFO mii = { sizeof(mii) };
-                mii.fMask = MIIM_STRING;
-                mii.dwTypeData = const_cast<LPWSTR>(L"Attach");
-                SetMenuItemInfoW(hMenu, ID_MENU_ATTACH, FALSE, &mii);
-
-                WCHAR myPath[MAX_PATH];
-                GetModuleFileNameW(NULL, myPath, MAX_PATH);
-                WCHAR* myExe = wcsrchr(myPath, L'\\');
-                myExe = myExe ? myExe + 1 : myPath;
-                WCHAR info[128];
-                swprintf_s(info, _countof(info), L"%s (PID: %lu)", myExe, g_targetProcessId);
-                MENUITEMINFO miiInfo = { sizeof(miiInfo) };
-                miiInfo.fMask = MIIM_STRING;
-                miiInfo.dwTypeData = info;
-                SetMenuItemInfoW(hMenu, ID_MENU_PROCINFO, FALSE, &miiInfo);
-
-                DrawMenuBar(hWnd);
-
-                std::wstring msg = L"Process (PID: " + std::to_wstring(oldPID) + L") exited, detached.\r\n\r\n";
-                Log(msg.c_str());
-
-                SendMessageW(g_hWndMain, WM_COMMAND, MAKEWPARAM(IDC_BTN_NEWSCAN, 0), 0);
-            }
-        }
-        {
-            HANDLE hProcess = g_hTargetProcess;
-            for (size_t i = 0; i < g_savedEntries.size(); i++)
-            {
-                SavedEntry& saved = g_savedEntries[i];
-                wchar_t newValueStr[64] = { 0 };
-                switch (saved.savedType)
-                {
-                case DATA_BYTE:
-                {
-                    uint8_t memVal = 0;
-                    if (ReadProcessMemory(hProcess, (LPCVOID)saved.entry.address, &memVal, sizeof(memVal), NULL))
-                    {
-                        if (saved.freeze) { WriteProcessMemory(hProcess, (LPVOID)saved.entry.address, &saved.entry.value.valByte, sizeof(uint8_t), NULL); memVal = saved.entry.value.valByte; }
-                        else if (memVal != saved.entry.value.valByte) { saved.entry.value.valByte = memVal; }
-                        swprintf(newValueStr, 64, L"%u", memVal);
-                    }
-                }
-                break;
-                case DATA_2BYTE:
-                {
-                    uint16_t memVal = 0;
-                    if (ReadProcessMemory(hProcess, (LPCVOID)saved.entry.address, &memVal, sizeof(memVal), NULL))
-                    {
-                        if (saved.freeze) { WriteProcessMemory(hProcess, (LPVOID)saved.entry.address, &saved.entry.value.val2Byte, sizeof(uint16_t), NULL); memVal = saved.entry.value.val2Byte; }
-                        else if (memVal != saved.entry.value.val2Byte) { saved.entry.value.val2Byte = memVal; }
-                        swprintf(newValueStr, 64, L"%u", memVal);
-                    }
-                }
-                break;
-                case DATA_4BYTE:
-                {
-                    uint32_t memVal = 0;
-                    if (ReadProcessMemory(hProcess, (LPCVOID)saved.entry.address, &memVal, sizeof(memVal), NULL))
-                    {
-                        if (saved.freeze) { WriteProcessMemory(hProcess, (LPVOID)saved.entry.address, &saved.entry.value.val4Byte, sizeof(uint32_t), NULL); memVal = saved.entry.value.val4Byte; }
-                        else if (memVal != saved.entry.value.val4Byte) { saved.entry.value.val4Byte = memVal; }
-                        swprintf(newValueStr, 64, L"%u", memVal);
-                    }
-                }
-                break;
-                case DATA_8BYTE:
-                {
-                    uint64_t memVal = 0;
-                    if (ReadProcessMemory(hProcess, (LPCVOID)saved.entry.address, &memVal, sizeof(memVal), NULL))
-                    {
-                        if (saved.freeze) { WriteProcessMemory(hProcess, (LPVOID)saved.entry.address, &saved.entry.value.val8Byte, sizeof(uint64_t), NULL); memVal = saved.entry.value.val8Byte; }
-                        else if (memVal != saved.entry.value.val8Byte) { saved.entry.value.val8Byte = memVal; }
-                        swprintf(newValueStr, 64, L"%llu", memVal);
-                    }
-                }
-                break;
-                case DATA_FLOAT:
-                {
-                    float memVal = 0;
-                    if (ReadProcessMemory(hProcess, (LPCVOID)saved.entry.address, &memVal, sizeof(memVal), NULL))
-                    {
-                        if (saved.freeze) { WriteProcessMemory(hProcess, (LPVOID)saved.entry.address, &saved.entry.value.valFloat, sizeof(float), NULL); memVal = saved.entry.value.valFloat; }
-                        else if (fabs(memVal - saved.entry.value.valFloat) > epsilon_float) { saved.entry.value.valFloat = memVal; }
-                        swprintf(newValueStr, 64, L"%.4f", memVal);
-                    }
-                }
-                break;
-                case DATA_DOUBLE:
-                {
-                    double memVal = 0;
-                    if (ReadProcessMemory(hProcess, (LPCVOID)saved.entry.address, &memVal, sizeof(memVal), NULL))
-                    {
-                        if (saved.freeze) { WriteProcessMemory(hProcess, (LPVOID)saved.entry.address, &saved.entry.value.valDouble, sizeof(double), NULL); memVal = saved.entry.value.valDouble; }
-                        else if (fabs(memVal - saved.entry.value.valDouble) > epsilon_double) { saved.entry.value.valDouble = memVal; }
-                        swprintf(newValueStr, 64, L"%.4f", memVal);
-                    }
-                }
-                break;
-                default:
-                    swprintf(newValueStr, 64, L"Unknown");
-                    break;
-                }
-                ListView_SetItemText(g_hListSavedAddresses, (int)i, 4, newValueStr);
-            }
-        }
-    }
-    break;
     case WM_NOTIFY:
-    {
-        NMHDR* pnmh = (NMHDR*)lParam;
+        return Handle_Notify(hWnd, wParam, lParam);
 
-        if (pnmh->idFrom == IDC_LIST_SCANRESULTS)
-        {
-            if (pnmh->code == NM_CUSTOMDRAW)
-            {
-                LPNMLVCUSTOMDRAW cd = (LPNMLVCUSTOMDRAW)lParam;
-                switch (cd->nmcd.dwDrawStage)
-                {
-                case CDDS_PREPAINT:
-                    return CDRF_NOTIFYITEMDRAW;
-                case CDDS_ITEMPREPAINT:
-                {
-                    int idx = (int)cd->nmcd.dwItemSpec;
-                    if (idx >= 0 && idx < (int)g_itemChanged.size() && g_itemChanged[idx])
-                        cd->clrText = RGB(255, 0, 0);
-                }
-                return CDRF_DODEFAULT;
-                default:
-                    return CDRF_DODEFAULT;
-                }
-            }
-            else if (pnmh->code == NM_DBLCLK)
-            {
-                LPNMITEMACTIVATE act = (LPNMITEMACTIVATE)lParam;
-                int iItem = act->iItem;
-                if (iItem >= 0 && iItem < (int)g_lastDisplayedEntries.size())
-                {
-                    SavedEntry saved{};
-                    saved.freeze = false;
-                    saved.entry = g_lastDisplayedEntries[iItem];
-                    saved.savedType = g_lastDisplayedEntries[iItem].dataType;
-                    g_savedEntries.push_back(saved);
-                    AppendSavedAddress(saved);
-                }
-            }
-        }
-        else if (pnmh->idFrom == IDC_LIST_SAVEDADDR)
-        {
-            if (pnmh->code == LVN_ITEMCHANGED)
-            {
-                NMLISTVIEW* lvl = (NMLISTVIEW*)lParam;
-                if (lvl->uChanged & LVIF_STATE)
-                {
-                    if (lvl->uNewState & LVIS_SELECTED)
-                    {
-                        g_pointerScanTargetIndex = lvl->iItem;
-
-                        SavedEntry& s = g_savedEntries[g_pointerScanTargetIndex];
-                        wchar_t buf[32];
-                        swprintf(buf, 32, L"%llX", (unsigned long long)s.entry.address);
-                        SetWindowTextW(g_hDynamicAddressEdit, buf);
-                    }
-                    BOOL chk = ListView_GetCheckState(g_hListSavedAddresses, lvl->iItem);
-                    g_savedEntries[lvl->iItem].freeze = (chk != FALSE);
-
-                    if (lvl->uNewState & LVIS_SELECTED)
-                    {
-                        int baseLen = GetWindowTextLengthW(g_hEditBaseAddress);
-                        if (baseLen > 0)
-                        {
-                            SavedEntry& s = g_savedEntries[lvl->iItem];
-                            wchar_t buf[32];
-                            swprintf(buf, 32, L"%llX", (unsigned long long)s.entry.address);
-                            SetWindowTextW(g_hDynamicAddressEdit, buf);
-                        }
-                    }
-                }
-            }
-            else if (pnmh->code == NM_CLICK)
-            {
-                LPNMITEMACTIVATE act = (LPNMITEMACTIVATE)lParam;
-                RECT rcDel;
-                if (ListView_GetSubItemRect(g_hListSavedAddresses, act->iItem, 5, LVIR_BOUNDS, &rcDel))
-                {
-                    if (act->ptAction.x >= rcDel.left && act->ptAction.x <= rcDel.right)
-                    {
-                        g_savedEntries.erase(g_savedEntries.begin() + act->iItem);
-                        ListView_DeleteItem(g_hListSavedAddresses, act->iItem);
-                        AdjustSavedListColumns();
-                    }
-                }
-            }
-            else if (pnmh->code == NM_DBLCLK)
-            {
-                LPNMITEMACTIVATE act = (LPNMITEMACTIVATE)lParam;
-                int iItem = act->iItem;
-                if (iItem < 0 || iItem >= (int)g_savedEntries.size())
-                    break;
-
-                POINT pt = act->ptAction;
-                RECT itemRc;
-                ListView_GetItemRect(g_hListSavedAddresses, iItem, &itemRc, LVIR_BOUNDS);
-
-                int colCount = 6;
-                int x = itemRc.left;
-                for (int col = 0; col < colCount; ++col)
-                {
-                    LV_COLUMN lvc = { LVCF_WIDTH };
-                    ListView_GetColumn(g_hListSavedAddresses, col, &lvc);
-                    int colLeft = x, colRight = x + lvc.cx;
-
-                    if (pt.x >= colLeft && pt.x <= colRight)
-                    {
-                        if (col == 2)
-                        {
-                            ShowEditAddressDialog(hWnd, iItem);
-                        }
-                        else if (col == 1 || col == 4)
-                        {
-                            RECT subRc;
-                            if (ListView_GetSubItemRect(g_hListSavedAddresses, iItem, col, LVIR_BOUNDS, &subRc))
-                            {
-                                wchar_t txt[256] = { 0 };
-                                ListView_GetItemText(g_hListSavedAddresses, iItem, col, txt, _countof(txt));
-
-                                g_hSubItemEdit = CreateWindowExW(
-                                    WS_EX_CLIENTEDGE, L"EDIT", txt,
-                                    WS_CHILD | WS_BORDER | WS_VISIBLE | ES_AUTOHSCROLL,
-                                    subRc.left, subRc.top,
-                                    subRc.right - subRc.left,
-                                    subRc.bottom - subRc.top,
-                                    g_hListSavedAddresses, (HMENU)1000,
-                                    GetModuleHandleW(NULL), NULL
-                                );
-                                SubclassEditControl(g_hSubItemEdit);
-                                g_editingItem = iItem;
-                                g_editingSubItem = col;
-                                SetFocus(g_hSubItemEdit);
-                                SendMessage(g_hSubItemEdit, EM_SETSEL, 0, -1);
-                            }
-                        }
-                        break;
-                    }
-                    x = colRight;
-                }
-            }
-        }
-
-        return 0;
-    }
-    break;
     case WM_COMMAND:
-    {
-        int wmId = LOWORD(wParam);
-        int wmEvent = HIWORD(wParam);
-
-        if (wmId == IDC_COMBO_SEARCHMODE && wmEvent == CBN_SELCHANGE)
-        {
-            HWND hComboSearchMode = GetDlgItem(hWnd, IDC_COMBO_SEARCHMODE);
-            LRESULT sel = SendMessage(hComboSearchMode, CB_GETCURSEL, 0, 0);
-            if (sel >= 3 && sel <= 6)
-            {
-                EnableWindow(g_hEditValue, FALSE);
-                SetWindowText(g_hEditValue, L"");
-            }
-            else
-            {
-                EnableWindow(g_hEditValue, TRUE);
-            }
-        }
-
-        switch (wmId)
-        {
-        case IDC_BTN_FIRSTSCAN:
-        {
-            wchar_t buffer[256] = {};
-            GetWindowText(g_hEditValue, buffer, 256);
-
-            int modeSel = (int)SendMessageW(
-                GetDlgItem(hWnd, IDC_COMBO_SEARCHMODE),
-                CB_GETCURSEL, 0, 0);
-
-            static const wchar_t* modeNames[] = {
-                L"Exact Value", L"Bigger Than", L"Smaller Than",
-                L"Unknown Initial Value", L"Increased Value",
-                L"Decreased Value",   L"Unchanged Value"
-            };
-            const wchar_t* modeName = (modeSel >= 0 && modeSel < _countof(modeNames))
-                ? modeNames[modeSel]
-                : L"Invalid Mode";
-
-                int selIndex = (int)SendMessageW(g_hComboValueType, CB_GETCURSEL, 0, 0);
-                DataType dt = static_cast<DataType>(selIndex);
-
-                {
-                    std::wstring logLine =
-                        L"First Scan:\r\n"
-                        L"  Value = \"" + std::wstring(buffer) + L"\"\r\n"
-                        L"  Type = " + DataTypeToString(dt) + L"\r\n"
-                        L"  Mode = " + modeName + L"\r\n\r\n";
-                    Log(logLine.c_str());
-                    RedrawWindow(g_hOutputLog, NULL, NULL, RDW_INVALIDATE | RDW_UPDATENOW);
-                }
-
-                SearchMode searchMode = SEARCH_EXACT;
-                switch (modeSel) {
-                case 0: searchMode = SEARCH_EXACT;          break;
-                case 1: searchMode = SEARCH_BIGGER;         break;
-                case 2: searchMode = SEARCH_SMALLER;        break;
-                case 3: searchMode = SEARCH_UNKNOWN_INITIAL; break;
-                default:
-                    MessageBox(g_hWndMain,
-                        L"Only 'Exact', 'Bigger', 'Smaller' or 'Unknown Initial' are allowed for first scan.",
-                        L"Error", MB_OK | MB_ICONERROR);
-                    return 0;
-                }
-
-                if (searchMode != SEARCH_UNKNOWN_INITIAL && buffer[0] == L'\0')
-                {
-                    MessageBox(g_hWndMain, L"A value must be entered to scan.",
-                        L"Error", MB_OK | MB_ICONERROR);
-                    break;
-                }
-
-                double searchVal = 0;
-                if (searchMode != SEARCH_UNKNOWN_INITIAL)
-                    GetSearchValueFromEdit(searchVal);
-
-                PerformFirstScan(searchVal, dt, searchMode);
-                EnableWindow(g_hBtnFirstScan, FALSE);
-                EnableWindow(g_hComboValueType, FALSE);
-                {
-                    HWND hComboSearch = GetDlgItem(g_hWndMain, IDC_COMBO_SEARCHMODE);
-                    int idx = (int)SendMessageW(hComboSearch,
-                        CB_FINDSTRINGEXACT,
-                        (WPARAM)-1,
-                        (LPARAM)L"Unknown Initial Value");
-                    if (idx != CB_ERR)
-                        SendMessageW(hComboSearch, CB_DELETESTRING, (WPARAM)idx, 0);
-                }
-        }
-        break;
-
-        case IDC_BTN_NEXTSCAN:
-        {
-            wchar_t buffer[256] = {};
-            GetWindowText(g_hEditValue, buffer, 256);
-
-            int modeSel = (int)SendMessageW(
-                GetDlgItem(hWnd, IDC_COMBO_SEARCHMODE),
-                CB_GETCURSEL, 0, 0);
-
-            static const wchar_t* modeNames[] = {
-                L"Exact Value", L"Bigger Than", L"Smaller Than",
-                L"Unknown Initial Value", L"Increased Value",
-                L"Decreased Value",   L"Unchanged Value"
-            };
-            const wchar_t* modeName = (modeSel >= 0 && modeSel < _countof(modeNames))
-                ? modeNames[modeSel]
-                : L"Invalid Mode";
-
-                SearchMode searchMode;
-                switch (modeSel)
-                {
-                case 0: searchMode = SEARCH_EXACT;     break;
-                case 1: searchMode = SEARCH_BIGGER;    break;
-                case 2: searchMode = SEARCH_SMALLER;   break;
-                case 4: searchMode = SEARCH_INCREASED; break;
-                case 5: searchMode = SEARCH_DECREASED; break;
-                case 6: searchMode = SEARCH_UNCHANGED; break;
-                default:
-                    MessageBox(g_hWndMain, L"Invalid search mode.", L"Error", MB_OK | MB_ICONERROR);
-                    return 0;
-                }
-
-                int selIndex = (int)SendMessageW(g_hComboValueType, CB_GETCURSEL, 0, 0);
-                DataType dt = static_cast<DataType>(selIndex);
-
-                {
-                    std::wstring logLine =
-                        L"Next Scan:\r\n"
-                        L"  Value = \"" + std::wstring(buffer) + L"\"\r\n"
-                        L"  Type = " + DataTypeToString(dt) + L"\r\n"
-                        L"  Mode = " + modeName + L"\r\n\r\n";
-                    Log(logLine.c_str());
-                    RedrawWindow(g_hOutputLog, NULL, NULL, RDW_INVALIDATE | RDW_UPDATENOW);
-                }
-
-                if ((searchMode == SEARCH_INCREASED ||
-                    searchMode == SEARCH_DECREASED ||
-                    searchMode == SEARCH_UNCHANGED) &&
-                    g_scanPager->Count() == 0)
-                {
-                    MessageBox(g_hWndMain,
-                        L"You must perform a first scan before this mode.",
-                        L"Error", MB_OK | MB_ICONERROR);
-                    break;
-                }
-
-                double searchVal = 0;
-                if (searchMode == SEARCH_EXACT ||
-                    searchMode == SEARCH_BIGGER ||
-                    searchMode == SEARCH_SMALLER)
-                {
-                    if (buffer[0] == L'\0')
-                    {
-                        MessageBox(g_hWndMain,
-                            L"A value must be entered to scan.",
-                            L"Error", MB_OK | MB_ICONERROR);
-                        break;
-                    }
-                    GetSearchValueFromEdit(searchVal);
-                }
-
-                SendMessage(g_hProgressBar, PBM_SETMARQUEE, TRUE, 30);
-                UpdateWindow(g_hProgressBar);
-
-                MSG msg;
-                g_previousScanEntries.clear();
-                for (size_t i = 0, tot = g_scanPager->Count(); i < tot; ++i)
-                {
-                    ScanEntry e;
-                    if (g_scanPager->GetEntry(i, e))
-                        g_previousScanEntries.push_back(e);
-
-                    if ((i % 1000) == 0)
-                    {
-                        while (PeekMessage(&msg, NULL, 0, 0, PM_REMOVE))
-                        {
-                            TranslateMessage(&msg);
-                            DispatchMessage(&msg);
-                        }
-                    }
-                }
-
-                SendMessage(g_hProgressBar, PBM_SETMARQUEE, FALSE, 0);
-                SendMessage(g_hProgressBar, PBM_SETPOS, 0, 0);
-                UpdateWindow(g_hProgressBar);
-
-                PerformNextScan(searchVal, dt, searchMode);
-        }
-        break;
-
-        case IDC_BTN_UNDOSCAN:
-            if (UndoScan()) UpdateScanResultsListView();
-            break;
-
-        case IDC_BTN_NEWSCAN:
-            ResetScans();
-
-            {
-                int totalLen = GetWindowTextLengthW(g_hOutputLog);
-                std::vector<wchar_t> buf(totalLen + 1);
-                GetWindowTextW(g_hOutputLog, buf.data(), totalLen + 1);
-                std::wstring logText(buf.data());
-
-                if (g_unrealDetected) {
-                    size_t pos = logText.find(L"First Scan:");
-                    if (pos != std::wstring::npos) {
-                        SendMessageW(g_hOutputLog, EM_SETSEL, pos, totalLen);
-                        SendMessageW(g_hOutputLog, EM_REPLACESEL, FALSE, (LPARAM)L"");
-                    }
-                }
-                else {
-                    size_t attachPos = logText.rfind(L"Attached to");
-                    if (attachPos != std::wstring::npos) {
-                        size_t cut = logText.find(L"\r\n\r\n", attachPos);
-                        if (cut != std::wstring::npos) {
-                            std::wstring keep = logText.substr(0, cut + 4);
-                            SetWindowTextW(g_hOutputLog, keep.c_str());
-                        }
-                        else {
-                            SetWindowTextW(g_hOutputLog, logText.c_str());
-                        }
-                    }
-                    else {
-                        SetWindowTextW(g_hOutputLog, L"MemRE Logs:\r\n\r\n");
-                    }
-                }
-            }
-
-            SetWindowTextW(g_hStaticScanStatus, L"Displaying 0 values out of 0");
-            SendMessageW(g_hProgressBar, PBM_SETPOS, 0, 0);
-            SendMessageW(g_hOutputLog, WM_VSCROLL, SB_LINEUP, 0);
-            SendMessageW(g_hOutputLog, WM_VSCROLL, SB_LINEUP, 0);
-            UpdateScanButtons(false);
-            EnableWindow(g_hBtnFirstScan, TRUE);
-            EnableWindow(g_hComboValueType, TRUE);
-            {
-                HWND hComboSearch = GetDlgItem(g_hWndMain, IDC_COMBO_SEARCHMODE);
-                SendMessageW(hComboSearch,
-                    CB_INSERTSTRING,
-                    (WPARAM)3,
-                    (LPARAM)L"Unknown Initial Value");
-            }
-            break;
-
-        case IDC_BTN_EXIT:
-        {
-            ResetScans();
-            CleanupDatFiles(g_scanResultsFolder);
-            WCHAR procName[MAX_PATH] = {};
-            DWORD size = MAX_PATH;
-            if (QueryFullProcessImageNameW(GetCurrentProcess(), 0, procName, &size))
-            {
-                WCHAR* baseName = wcsrchr(procName, L'\\');
-                baseName = baseName ? baseName + 1 : procName;
-                if (_wcsicmp(baseName, L"MemRE.exe") == 0)
-                    TerminateProcess(GetCurrentProcess(), 0);
-            }
-            DestroyWindow(hWnd);
-        }
-        break;
-        case IDC_BTN_SAVETABLE:
-        {
-            OPENFILENAMEW ofn{ sizeof(ofn) };
-            wchar_t szFile[MAX_PATH] = { 0 };
-            std::wstring defaultPath = g_tablesFolder + L"\\";
-            if (g_isAttached && g_hTargetProcess) {
-                wchar_t fullPath[MAX_PATH] = { 0 };
-                DWORD sz = MAX_PATH;
-                if (QueryFullProcessImageNameW(g_hTargetProcess, 0, fullPath, &sz)) {
-                    wchar_t* base = wcsrchr(fullPath, L'\\');
-                    base = base ? base + 1 : fullPath;
-                    if (wcsstr(base, L".exe")) *wcsstr(base, L".exe") = L'\0';
-                    defaultPath += base;
-                }
-                else defaultPath += L"table";
-            }
-            else defaultPath += L"table";
-            defaultPath += L".mre";
-            wcscpy_s(szFile, defaultPath.c_str());
-            ofn.hwndOwner = hWnd;
-            ofn.lpstrFilter = L"MemRE Tables (*.mre)\0*.mre\0All Files\0*.*\0\0";
-            ofn.lpstrFile = szFile;
-            ofn.nMaxFile = MAX_PATH;
-            ofn.lpstrDefExt = L"mre";
-            ofn.Flags = OFN_OVERWRITEPROMPT | OFN_PATHMUSTEXIST;
-
-            if (GetSaveFileNameW(&ofn)) {
-                std::wofstream out(ofn.lpstrFile);
-                if (!out) {
-                    MessageBoxW(hWnd, L"Cannot open for writing.", L"Error", MB_OK | MB_ICONERROR);
-                }
-                else {
-                    for (auto& s : g_savedEntries) {
-                        std::wstring safeDesc = s.desc;
-                        for (auto& c : safeDesc)
-                            if (c == L',') c = L' ';
-
-                        wchar_t addrBuf[32];
-                        swprintf(addrBuf, 32, L"%llX", (unsigned long long)s.entry.address);
-
-                        std::wstring typeTok = std::to_wstring((int)s.savedType);
-
-                        std::wstring valTok;
-                        switch (s.savedType) {
-                        case DATA_BYTE:   valTok = std::to_wstring(s.entry.value.valByte);   break;
-                        case DATA_2BYTE:  valTok = std::to_wstring(s.entry.value.val2Byte);  break;
-                        case DATA_4BYTE:  valTok = std::to_wstring(s.entry.value.val4Byte);  break;
-                        case DATA_8BYTE:  valTok = std::to_wstring(s.entry.value.val8Byte);  break;
-                        case DATA_FLOAT:  valTok = std::to_wstring(s.entry.value.valFloat);  break;
-                        case DATA_DOUBLE: valTok = std::to_wstring(s.entry.value.valDouble); break;
-                        default:          valTok = L"0";                                      break;
-                        }
-
-                        std::wstring ptrTok = s.pointerExpr;
-
-                        out
-                            << addrBuf << L","
-                            << typeTok << L","
-                            << L"" << L","
-                            << L"0" << L","
-                            << safeDesc << L","
-                            << ptrTok << L"\n";
-                    }
-                    out.close();
-                }
-            }
-        }
-        break;
-        case IDC_BTN_LOADTABLE:
-        {
-            OPENFILENAMEW ofn{ sizeof(ofn) };
-            wchar_t szFile[MAX_PATH] = { 0 };
-            wcscpy_s(szFile, (g_tablesFolder + L"\\*.mre").c_str());
-
-            ofn.hwndOwner = hWnd;
-            ofn.lpstrFilter = L"MemRE Tables (*.mre)\0*.mre\0All Files\0*.*\0\0";
-            ofn.lpstrFile = szFile;
-            ofn.nMaxFile = MAX_PATH;
-            ofn.lpstrDefExt = L"mre";
-            ofn.Flags = OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST;
-
-            if (GetOpenFileNameW(&ofn)) {
-                LoadTableFromFile(ofn.lpstrFile);
-            }
-        }
-        break;
-        case IDC_BTN_ADDADDRESS:
-            ShowAddAddressDialog(hWnd);
-            break;
-        case IDC_BTN_SAVECT:
-        {
-            CreateDirectoryW(g_tablesFolder.c_str(), nullptr);
-
-            OPENFILENAMEW ofn{ sizeof(ofn) };
-            wchar_t szFile[MAX_PATH] = { 0 };
-            std::wstring defaultName = g_tablesFolder + L"\\";
-            if (g_isAttached && g_hTargetProcess) {
-                wchar_t fullPath[MAX_PATH] = { 0 };
-                DWORD sz = MAX_PATH;
-                if (QueryFullProcessImageNameW(g_hTargetProcess, 0, fullPath, &sz)) {
-                    wchar_t* base = wcsrchr(fullPath, L'\\');
-                    base = base ? base + 1 : fullPath;
-                    wchar_t* dot = wcsstr(base, L".exe");
-                    if (dot) *dot = L'\0';
-                    defaultName += base;
-                }
-                else {
-                    defaultName += L"table";
-                }
-            }
-            else {
-                defaultName += L"table";
-            }
-            defaultName += L".CT";
-            wcscpy_s(szFile, defaultName.c_str());
-
-            ofn.hwndOwner = hWnd;
-            ofn.lpstrFilter = L"Cheat Engine Tables (*.ct)\0*.ct\0All Files\0*.*\0\0";
-            ofn.lpstrFile = szFile;
-            ofn.nMaxFile = MAX_PATH;
-            ofn.lpstrDefExt = L"ct";
-            ofn.Flags = OFN_OVERWRITEPROMPT | OFN_PATHMUSTEXIST;
-
-            if (GetSaveFileNameW(&ofn)) {
-                std::wofstream out(ofn.lpstrFile);
-                if (!out) {
-                    MessageBoxW(hWnd, L"Cannot open file for writing.", L"Error", MB_OK | MB_ICONERROR);
-                }
-                else {
-                    out << L"<?xml version=\"1.0\" encoding=\"utf-8\"?>\n";
-                    out << L"<CheatTable CheatEngineTableVersion=\"45\">\n";
-                    out << L"  <CheatEntries>\n";
-
-                    for (size_t i = 0; i < g_savedEntries.size(); ++i) {
-                        const auto& s = g_savedEntries[i];
-                        out << L"    <CheatEntry>\n";
-                        out << L"      <ID>" << i << L"</ID>\n";
-
-                        std::wstring desc = s.desc.empty() ? L"N/A" : s.desc;
-                        for (auto& c : desc) if (c == L'"') c = L'\'';
-                        out << L"      <Description>\"" << desc << L"\"</Description>\n";
-
-                        out << L"      <ShowAsSigned>0</ShowAsSigned>\n";
-                        out << L"      <VariableType>" << DataTypeToString(s.savedType) << L"</VariableType>\n";
-
-                        if (!s.pointerExpr.empty()) {
-                            std::vector<std::wstring> parts;
-                            {
-                                std::wistringstream ss(s.pointerExpr);
-                                std::wstring tok;
-                                while (std::getline(ss, tok, L',')) {
-                                    parts.push_back(trim(tok));
-                                }
-                            }
-                            out << L"      <Address>" << parts[0] << L"</Address>\n";
-
-                            if (parts.size() > 1) {
-                                out << L"      <Offsets>\n";
-                                for (int idx = (int)parts.size() - 1; idx >= 1; --idx) {
-                                    out << L"        <Offset>" << parts[idx] << L"</Offset>\n";
-                                }
-                                out << L"      </Offsets>\n";
-                            }
-                        }
-                        else {
-                            wchar_t addrBuf[32];
-                            swprintf(addrBuf, 32, L"%llX", (unsigned long long)s.entry.address);
-                            out << L"      <Address>" << addrBuf << L"</Address>\n";
-                        }
-
-                        out << L"    </CheatEntry>\n";
-                    }
-
-                    out << L"  </CheatEntries>\n";
-                    out << L"  <UserdefinedSymbols/>\n";
-                    out << L"</CheatTable>\n";
-                    out.close();
-                }
-            }
-        }
-        break;
-
-        case IDC_BTN_OFFSET_ADD:
-        {
-            wchar_t buf[64] = {};
-            GetWindowTextW(g_hEditOffsetEntry, buf, _countof(buf));
-            if (buf[0]) {
-                SendMessageW(g_hListOffsets, LB_ADDSTRING, 0, (LPARAM)buf);
-                SetWindowTextW(g_hEditOffsetEntry, L"");
-                int cnt = (int)SendMessageW(g_hListOffsets, LB_GETCOUNT, 0, 0);
-                SendMessageW(g_hListOffsets, LB_SETTOPINDEX, cnt - 1, 0);
-            }
-            break;
-        }
-
-        case IDC_BTN_OFFSET_DEL:
-        {
-            int sel = (int)SendMessageW(g_hListOffsets, LB_GETCURSEL, 0, 0);
-            if (sel != LB_ERR)
-                SendMessageW(g_hListOffsets, LB_DELETESTRING, sel, 0);
-            break;
-        }
-
-        case IDC_BTN_OFFSET_AUTO:
-        {
-            ShowAutoOffsetsDialog(hWnd, g_resolvedBaseAddress);
-            break;
-        }
-        case IDC_BTN_POINTERSCAN:
-        {
-            if (!g_isPointerScanning)
-            {
-                // if "Scan From File" is checked
-                if (IsDlgButtonChecked(hWnd, IDC_CHECK_SCAN_SAVED_FILE) == BST_CHECKED)
-                {
-                    // enter scanning state
-                    g_isPointerScanning = true;
-                    SetWindowTextW(g_hBtnPointerScan, L"Stop");
-
-                    // disable UI controls during "scan from file"
-                    EnableWindow(g_hEditBaseAddress, FALSE);
-                    EnableWindow(g_hDynamicAddressEdit, FALSE);
-                    EnableWindow(g_hEditMaxDepth, FALSE);
-                    EnableWindow(g_hListOffsets, FALSE);
-                    EnableWindow(g_hBtnAddOffset, FALSE);
-                    EnableWindow(g_hBtnRemoveOffset, FALSE);
-                    EnableWindow(g_hBtnAutoOffset, FALSE);
-                    EnableWindow(GetDlgItem(hWnd, IDC_CHECK_SCAN_SAVED_FILE), FALSE);
-
-                    // perform filtering of loaded chains
-                    std::vector<std::vector<std::wstring>> active;
-                    for (auto& chain : g_loadedChains)
-                    {
-                        // pass both process handle and PID to match signature
-                        uintptr_t addr = ResolvePointerChain(
-                            g_hTargetProcess,
-                            g_targetProcessId,
-                            chain
-                        );
-                        if (addr != 0)
-                            active.push_back(chain);
-                    }
-
-                    // prompt user to save survivors
-                    int total = (int)g_loadedChains.size();
-                    int kept = (int)active.size();
-                    std::wstring msg =
-                        L"Of " + std::to_wstring(total) +
-                        L" saved chains, " + std::to_wstring(kept) +
-                        L" are still active.\n\nSave active chains?";
-                    if (MessageBoxW(hWnd, msg.c_str(), L"Scan From File",
-                        MB_YESNO | MB_ICONQUESTION) == IDYES)
-                    {
-                        // default output path = original + "_active.MPTR"
-                        std::wstring base = g_mptrFilePath.substr(
-                            0, g_mptrFilePath.find_last_of(L'.')
-                        ) + L"_active.MPTR";
-
-                        wchar_t outFile[MAX_PATH];
-                        wcscpy_s(outFile, base.c_str());
-                        OPENFILENAMEW sfn{ sizeof(sfn) };
-                        sfn.hwndOwner = hWnd;
-                        sfn.lpstrFilter = L"Pointer files (*.MPTR)\0*.MPTR\0\0";
-                        sfn.lpstrFile = outFile;
-                        sfn.nMaxFile = MAX_PATH;
-                        sfn.lpstrDefExt = L"MPTR";
-                        sfn.Flags = OFN_OVERWRITEPROMPT | OFN_PATHMUSTEXIST;
-                        if (GetSaveFileNameW(&sfn))
-                        {
-                            std::wofstream fout(sfn.lpstrFile, std::ios::trunc);
-                            for (auto& chain : active)
-                            {
-                                fout << chain[0];
-                                for (size_t i = 1; i < chain.size(); ++i)
-                                    fout << L"," << chain[i];
-                                fout << L"\n";
-                            }
-                        }
-                    }
-
-                    // restore UI and state
-                    g_loadedChains.clear();
-                    g_mptrFilePath.clear();
-                    g_isPointerScanning = false;
-                    SetWindowTextW(g_hBtnPointerScan, L"Scan");
-                    CheckDlgButton(hWnd, IDC_CHECK_SCAN_SAVED_FILE, BST_UNCHECKED);
-                    EnableWindow(g_hEditBaseAddress, TRUE);
-                    EnableWindow(g_hDynamicAddressEdit, TRUE);
-                    EnableWindow(g_hEditMaxDepth, TRUE);
-                    EnableWindow(g_hListOffsets, TRUE);
-                    EnableWindow(g_hBtnAddOffset, TRUE);
-                    EnableWindow(g_hBtnRemoveOffset, TRUE);
-                    EnableWindow(g_hBtnAutoOffset, TRUE);
-                    EnableWindow(GetDlgItem(hWnd, IDC_CHECK_SCAN_SAVED_FILE), TRUE);
-                    SendMessage(g_hProgressBar, PBM_SETMARQUEE, FALSE, 0);
-                }
-                else
-                {
-                    g_stopPointerScan = false;
-                    g_isPointerScanning = true;
-                    SetWindowTextW(g_hBtnPointerScan, L"Stop");
-
-                    EnableWindow(g_hEditBaseAddress, FALSE);
-                    EnableWindow(g_hDynamicAddressEdit, FALSE);
-                    EnableWindow(g_hEditMaxDepth, FALSE);
-                    EnableWindow(g_hListOffsets, FALSE);
-                    EnableWindow(g_hBtnAddOffset, FALSE);
-                    EnableWindow(g_hBtnRemoveOffset, FALSE);
-                    EnableWindow(g_hBtnAutoOffset, FALSE);
-                    EnableWindow(GetDlgItem(hWnd, IDC_CHECK_SCAN_SAVED_FILE), FALSE);
-
-                    wchar_t baseBuf[64] = { 0 };
-                    GetWindowTextW(g_hEditBaseAddress, baseBuf, _countof(baseBuf));
-                    std::wstring baseStr(baseBuf);
-                    uintptr_t baseAddr = ParsePointerAddress(baseStr);
-                    if (!baseAddr)
-                    {
-                        Log(L"Error: could not parse base address\r\n\r\n");
-
-                        // abort and restore UI
-                        g_isPointerScanning = false;
-                        SetWindowTextW(g_hBtnPointerScan, L"Scan");
-                        EnableWindow(g_hEditBaseAddress, TRUE);
-                        EnableWindow(g_hDynamicAddressEdit, TRUE);
-                        EnableWindow(g_hEditMaxDepth, TRUE);
-                        EnableWindow(g_hListOffsets, TRUE);
-                        EnableWindow(g_hBtnAddOffset, TRUE);
-                        EnableWindow(g_hBtnRemoveOffset, TRUE);
-                        EnableWindow(g_hBtnAutoOffset, TRUE);
-                        EnableWindow(GetDlgItem(hWnd, IDC_CHECK_SCAN_SAVED_FILE), TRUE);
-                        SendMessage(g_hProgressBar, PBM_SETMARQUEE, FALSE, 0);
-                        break;
-                    }
-
-                    wchar_t dynBuf[64] = { 0 };
-                    GetWindowTextW(g_hDynamicAddressEdit, dynBuf, _countof(dynBuf));
-                    std::wstring dynStr(dynBuf);
-                    uintptr_t dynAddr = ParsePointerAddress(dynStr);
-                    if (!dynAddr)
-                    {
-                        Log(L"Error: could not parse dynamic address\r\n");
-                        break;
-                    }
-
-                    // read the max‑depth out of its edit box
-                    wchar_t depthBuf[16] = { 0 };
-                    GetWindowTextW(g_hEditMaxDepth, depthBuf, _countof(depthBuf));
-                    int maxDepth = _wtoi(depthBuf);
-
-                    g_positionalOffsets.clear();
-                    int count = (int)SendMessageW(g_hListOffsets, LB_GETCOUNT, 0, 0);
-                    for (int i = 0; i < count; ++i)
-                    {
-                        wchar_t buf[32] = {};
-                        SendMessageW(g_hListOffsets, LB_GETTEXT, i, (LPARAM)buf);
-                        DWORD_PTR off = static_cast<DWORD_PTR>(_wcstoui64(buf, nullptr, 16));
-                        g_positionalOffsets.push_back(off);
-                    }
-
-                    // kick off the pointer‑scan thread
-                    auto* sp = new PointerScanParams{
-                        baseAddr,
-                        dynAddr,
-                        maxDepth
-                    };
-                    g_hPointerScanThread = CreateThread(
-                        nullptr, 0,
-                        PointerScanThreadProc,
-                        sp, 0, nullptr
-                    );
-
-                    // put the progress bar into marquee mode.. ON HOLD WHAT A JOKE
-                    // SendMessage(g_hProgressBar, PBM_SETMARQUEE, TRUE, 30);
-                }
-            }
-            else
-            {
-                // user clicked “Stop”
-                g_stopPointerScan = true;
-            }
-            break;
-		}
-        case IDC_CHECK_SCAN_SAVED_FILE:
-            if (HIWORD(wParam) == BN_CLICKED &&
-                IsDlgButtonChecked(hWnd, IDC_CHECK_SCAN_SAVED_FILE) == BST_CHECKED)
-            {
-                // 1) Prompt user to select an existing .MPTR file
-                wchar_t inFile[MAX_PATH] = {};
-                OPENFILENAMEW ofn{ sizeof(ofn) };
-                ofn.hwndOwner = hWnd;
-                ofn.lpstrFilter = L"Pointer files (*.MPTR)\0*.MPTR\0All Files\0*.*\0\0";
-                ofn.lpstrFile = inFile;
-                ofn.nMaxFile = MAX_PATH;
-                ofn.Flags = OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST;
-                if (!GetOpenFileNameW(&ofn)) {
-                    // User cancelled: reset checkbox and exit
-                    CheckDlgButton(hWnd, IDC_CHECK_SCAN_SAVED_FILE, BST_UNCHECKED);
-                    break;
-                }
-
-                // 2) Remember path and load pointer chains into memory
-                g_mptrFilePath = inFile;
-                g_loadedChains.clear();
-                std::wifstream fin(inFile);
-                std::wstring line;
-                while (std::getline(fin, line)) {
-                    if (line.empty())
-                        continue;
-                    g_loadedChains.push_back(splitPointerExpr(line));
-                }
-
-            }
-            break;
-
-        case IDC_BTN_VIEWPTRS:
-        {
-            // 1) Prompt for an existing .MPTR file
-            wchar_t szFile[MAX_PATH] = {};
-            OPENFILENAMEW ofn{ sizeof(ofn) };
-            ofn.hwndOwner = g_hWndMain;
-            ofn.lpstrFilter = L"Pointer files (*.MPTR)\0*.MPTR\0All Files\0*.*\0\0";
-            ofn.lpstrFile = szFile;
-            ofn.nMaxFile = MAX_PATH;
-            ofn.Flags = OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST;
-            if (!GetOpenFileNameW(&ofn))
-                break; 
-
-            // 2) Load each comma‑delimited chain into g_loadedChains
-            g_mptrFilePath = szFile;
-            g_loadedChains.clear();
-            std::wifstream fin(szFile);
-            std::wstring  line;
-            while (std::getline(fin, line))
-                if (!line.empty())
-                    g_loadedChains.push_back(splitPointerExpr(line));
-
-            // 3) Show the pointer‑table dialog
-            ShowPointerTableDialog(g_hWndMain);
-        }
-        break;
-
-        case ID_MENU_ATTACH:
-        {
-            HMENU hMenu = GetMenu(hWnd);
-            MENUITEMINFO mii = { sizeof(mii) };
-            mii.fMask = MIIM_STRING;
-
-            if (!g_isAttached)
-            {
-                g_targetPID = 0;
-                SelectProcessDialog(hWnd);
-                if (g_targetPID)
-                    AttachToProcess(g_targetPID);
-            }
-            else
-            {
-                DWORD oldPID = g_targetProcessId;
-                WCHAR procPath[MAX_PATH] = {};
-                DWORD sz = MAX_PATH;
-                if (QueryFullProcessImageNameW(g_hTargetProcess, 0, procPath, &sz))
-                {
-                    WCHAR* exeName = wcsrchr(procPath, L'\\');
-                    exeName = exeName ? exeName + 1 : procPath;
-                    std::wstring line =
-                        L"Detached from " +
-                        std::wstring(exeName) +
-                        L" (PID: " +
-                        std::to_wstring(oldPID) +
-                        L")\r\n\r\n";
-                    Log(line.c_str());
-                }
-
-                if (g_hTargetProcess && g_hTargetProcess != GetCurrentProcess())
-                    CloseHandle(g_hTargetProcess);
-
-                g_hTargetProcess = g_hOriginalProcess;
-                g_targetProcessId = g_originalProcessId;
-                g_isAttached = false;
-
-                HMENU hMenu = GetMenu(hWnd);
-                MENUITEMINFO mii = { sizeof(mii) };
-                mii.fMask = MIIM_STRING;
-                mii.dwTypeData = const_cast<LPWSTR>(L"Attach");
-                SetMenuItemInfoW(hMenu, ID_MENU_ATTACH, FALSE, &mii);
-
-                WCHAR myPath[MAX_PATH];
-                DWORD mySz = GetModuleFileNameW(NULL, myPath, MAX_PATH);
-                WCHAR* myExe = wcsrchr(myPath, L'\\');
-                myExe = myExe ? myExe + 1 : myPath;
-                WCHAR info[128];
-                swprintf_s(info, _countof(info), L"%s (PID: %lu)", myExe, g_originalProcessId);
-                MENUITEMINFO miiInfo = { sizeof(miiInfo) };
-                miiInfo.fMask = MIIM_STRING;
-                miiInfo.dwTypeData = info;
-                SetMenuItemInfoW(hMenu, ID_MENU_PROCINFO, FALSE, &miiInfo);
-
-                DrawMenuBar(hWnd);
-                EnableWindow(g_hBtnAutoOffset, FALSE);
-            }
-            break;
-        }
-        case ID_MENU_THREAD:
-        {
-            g_targetPID = 0;
-
-            wchar_t origBaseText[64] = {};
-            GetWindowTextW(g_hEditBaseAddress, origBaseText, _countof(origBaseText));
-            uintptr_t origResolved = g_resolvedBaseAddress;
-
-            SelectProcessDialog(hWnd);
-            if (!g_targetPID)
-                break;
-
-            // Inject
-            InjectSelfIntoProcess(g_targetPID);
-
-            // Open the log with injection info:
-            {
-                HANDLE hProc = OpenProcess(
-                    PROCESS_QUERY_INFORMATION | PROCESS_VM_READ,
-                    FALSE,
-                    g_targetPID
-                );
-                if (hProc)
-                {
-                    // figure out the exe name
-                    wchar_t fullPath[MAX_PATH]{};
-                    DWORD len = MAX_PATH;
-                    QueryFullProcessImageNameW(hProc, 0, fullPath, &len);
-                    wchar_t* exePtr = wcsrchr(fullPath, L'\\');
-                    const wchar_t* exeName = exePtr ? exePtr + 1 : fullPath;
-
-                    // grab module base
-                    HMODULE hMods[1];
-                    DWORD cbNeeded = 0;
-                    if (EnumProcessModules(hProc, hMods, sizeof(hMods), &cbNeeded))
-                    {
-                        MODULEINFO mi{};
-                        if (GetModuleInformation(hProc, hMods[0], &mi, sizeof(mi)))
-                        {
-                            wchar_t buf[64];
-                            swprintf(buf, 64,
-                                L"Base Address: 0x%llX\r\n\r\n",
-                                (unsigned long long)mi.lpBaseOfDll);
-                            // Log(buf);
-
-                             // also update the base‑address edit
-                            wchar_t editBuf[32];
-                            swprintf(editBuf, 32,
-                                L"%llX",
-                                (unsigned long long)mi.lpBaseOfDll);
-                            SetWindowTextW(g_hEditBaseAddress, editBuf);
-                            g_resolvedBaseAddress = (uintptr_t)mi.lpBaseOfDll;
-                        }
-                    }
-                    CloseHandle(hProc);
-                }
-            }
-
-            SetWindowTextW(g_hEditBaseAddress, origBaseText);
-            g_resolvedBaseAddress = origResolved;
-
-            // make sure the log actually redraws immediately
-            RedrawWindow(g_hOutputLog, nullptr, nullptr, RDW_INVALIDATE | RDW_UPDATENOW);
-        }
-        break;
-        default:
-            return DefWindowProcW(hWnd, message, wParam, lParam);
-        }
-    }
-    break;
+        return Handle_Command(hWnd, wParam, lParam);
 
     case WM_DESTROY:
-        KillTimer(hWnd, IDT_UPDATE_TIMER);
-        PostQuitMessage(0);
-        break;
+        return Handle_Destroy(hWnd);
+
     default:
         return DefWindowProcW(hWnd, message, wParam, lParam);
     }
-    return 0;
 }
 
 DWORD WINAPI MainThread(LPVOID lpParam)
