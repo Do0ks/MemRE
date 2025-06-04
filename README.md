@@ -5,15 +5,13 @@ MemRE is an injectable memory editor with Unreal Engine support! MemRE has an op
 ###### Precompiled download comes with MemRE and MemRE Loader.
 ### For more information, join MemRE Discord for full documentation, nightly builds, tutorials, etc. I also push bug fixes there first: https://discord.gg/7nGkqwdJhn
 
-### Known Issues/Fixes:
+### Known Issues/Fixes + Nightly Builds:
 <Details>
-  
-### Fixed:
-Unknown Initial Value - Updated Release located in Discord: Nightly Builds.  
-"Bigger Than" and "Smaller Than" - Updated Release located in Discord: Nightly Builds.
-  
-### Known Bugs:
-~~"Bigger Than" and "Smaller Than" is broken, crashes after the 3rd scan. Working on a fix.~~  
+
+### Discord Nightly Builds:  
+
+- Added a Marquee indicator to the progress bar between scans to help indicate the program is thinking.
+- Added a safe guard while Marquee is enabled to prevent interaction with the scanner until the Marquee is complete.  
 
 </Details>
 
