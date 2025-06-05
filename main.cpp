@@ -150,6 +150,9 @@ static constexpr DWORD_PTR MAX_OFFSET = 0xFFF;
 static constexpr DWORD_PTR OFFSET_STEP = sizeof(DWORD_PTR);
 static constexpr DWORD_PTR MAX_SUBOFFSET = 0x2000;
 
+static double g_searchLow = 0.0;
+static double g_searchHigh = 0.0;
+
 /*===========Enums & Typedefs==========*/
 enum DataType {
     DATA_BYTE,
@@ -164,6 +167,7 @@ enum SearchMode {
     SEARCH_EXACT,
     SEARCH_BIGGER,
     SEARCH_SMALLER,
+    SEARCH_BETWEEN,
     SEARCH_UNKNOWN_INITIAL,
     SEARCH_INCREASED,
     SEARCH_DECREASED,
@@ -927,7 +931,7 @@ LRESULT CALLBACK PointerTableProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPa
     };
 
     auto DeleteSelectedChains = [&]() {
-        // 1) Collect all selected indices
+        // Collect all selected indices
         std::vector<int> selIndices;
         int idx = -1;
         while ((idx = ListView_GetNextItem(lv, idx, LVNI_SELECTED)) != -1) {
@@ -936,10 +940,10 @@ LRESULT CALLBACK PointerTableProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPa
         if (selIndices.empty())
             return;
 
-        // 2) Sort in descending order
+        // Sort in descending order
         std::sort(selIndices.rbegin(), selIndices.rend());
 
-        // 3) Remove from ListView and from g_loadedChains
+        // Remove from ListView and from g_loadedChains
         for (int i : selIndices) {
             ListView_DeleteItem(lv, i);
             g_loadedChains.erase(g_loadedChains.begin() + i);
@@ -977,7 +981,7 @@ LRESULT CALLBACK PointerTableProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPa
             ListView_InsertColumn(lv, i, &col);
         }
 
-        // “Save” button
+        // Save button
         btnSave = CreateWindowW(L"BUTTON", L"Save Pointer Table",
             WS_CHILD | WS_VISIBLE | BS_DEFPUSHBUTTON,
             20, rc.bottom - 60, 160, 30,
@@ -1085,7 +1089,7 @@ LRESULT CALLBACK PointerTableProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPa
                 int sel = (int)SendMessageW(comboType, CB_GETCURSEL, 0, 0);
                 saved.entry.dataType = saved.savedType = static_cast<DataType>(sel);
 
-                // 3) read the value now (so saved.entry.value is populated)
+                // 3) read the value (so saved.entry.value is populated)
                 switch (saved.entry.dataType)
                 {
                 case DATA_BYTE:
@@ -1126,19 +1130,19 @@ LRESULT CALLBACK PointerTableProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPa
                 } break;
                 }
 
-                // 4) reconstruct the comma‑delimited pointer expression
+                // reconstruct the comma‑delimited pointer expression
                 std::wstring expr = chain[0];
                 for (size_t i = 1; i < chain.size(); ++i)
                     expr += L"," + chain[i];
                 saved.pointerExpr = expr;
 
-                // 5) push into the saved list
+                // push into the saved list
                 g_savedEntries.push_back(saved);
                 AppendSavedAddress(saved);
             }
         }
 
-        // 2) catch Delete key on selected row
+        // catch Delete key on selected row
         if (pnmh->hwndFrom == lv && pnmh->code == LVN_KEYDOWN)
         {
             LPNMLVKEYDOWN kd = (LPNMLVKEYDOWN)lParam;
@@ -1195,7 +1199,7 @@ struct BFSNode {
 
 static char GetHighHexDigit(uintptr_t v)
 {
-    // e.g. extract the top‑nibble of the most significant byte
+    // Extract the top‑nibble of the most significant byte
     int bits = (sizeof(v) * 8 - 4);
     return char((v >> bits) & 0xF);
 }
@@ -1725,7 +1729,7 @@ static LRESULT Handle_Create(HWND hWnd, LPARAM lParam)
         btnX + comboW + gap, comboY, comboW, comboH, hWnd, (HMENU)IDC_COMBO_SEARCHMODE, hInst, NULL
     );
     for (auto* s : { L"Exact Value",L"Bigger Than",L"Smaller Than",
-                     L"Increased Value", L"Decreased Value",
+                     L"Value Between", L"Increased Value", L"Decreased Value",
                      L"Unchanged Value", L"Unknown Initial Value" })
         SendMessageW(hComboSearch, CB_ADDSTRING, 0, (LPARAM)s);
     SendMessageW(hComboSearch, CB_SETCURSEL, 0, 0);
@@ -1836,7 +1840,7 @@ static LRESULT Handle_Create(HWND hWnd, LPARAM lParam)
         editX, frameY + 15 + 60, 40, 24,
         hWnd, (HMENU)IDC_EDIT_MAXDEPTH, hInst, NULL);
 
-    // Checkbox: “Scan From Saved File”  
+    // Checkbox: Scan From Saved File
     HWND hChkSaved = CreateWindowW(
         L"BUTTON", L"Scan From File",
         WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX,
@@ -2000,6 +2004,17 @@ static LRESULT Handle_Timer(HWND hWnd)
         g_isPointerScanning = false;
         SetWindowTextW(g_hBtnPointerScan, L"Scan");
 
+        SendMessage(g_hProgressBar, PBM_SETMARQUEE, FALSE, 0);
+        {
+            LONG_PTR style = GetWindowLongPtr(g_hProgressBar, GWL_STYLE);
+            SetWindowLongPtr(
+                g_hProgressBar,
+                GWL_STYLE,
+                style & ~PBS_MARQUEE
+            );
+        }
+        UpdateWindow(g_hProgressBar);
+
         EnableWindow(g_hEditBaseAddress, TRUE);
         EnableWindow(g_hDynamicAddressEdit, TRUE);
         EnableWindow(g_hEditMaxDepth, TRUE);
@@ -2007,6 +2022,7 @@ static LRESULT Handle_Timer(HWND hWnd)
         EnableWindow(g_hBtnAddOffset, TRUE);
         EnableWindow(g_hBtnRemoveOffset, TRUE);
         EnableWindow(g_hBtnAutoOffset, TRUE);
+        EnableWindow(g_hBtnViewPTRs, TRUE);
         EnableWindow(GetDlgItem(hWnd, IDC_CHECK_SCAN_SAVED_FILE), TRUE);
     }
 
@@ -2351,7 +2367,8 @@ static LRESULT Handle_Command(HWND hWnd, WPARAM wParam, LPARAM lParam)
     {
         HWND hComboSearchMode = GetDlgItem(hWnd, IDC_COMBO_SEARCHMODE);
         LRESULT sel = SendMessage(hComboSearchMode, CB_GETCURSEL, 0, 0);
-        if (sel >= 3 && sel <= 6)
+        // disable the edit box only for modes 4..7 (Increased, Decreased, Unchanged, Unknown)
+        if (sel >= 4 && sel <= 7)
         {
             EnableWindow(g_hEditValue, FALSE);
             SetWindowText(g_hEditValue, L"");
@@ -2375,7 +2392,7 @@ static LRESULT Handle_Command(HWND hWnd, WPARAM wParam, LPARAM lParam)
 
         static const wchar_t* modeNames[] = {
             L"Exact Value", L"Bigger Than", L"Smaller Than",
-            L"Unknown Initial Value", L"Increased Value",
+            L"Value Between", L"Unknown Initial Value", L"Increased Value",
             L"Decreased Value",   L"Unchanged Value"
         };
         const wchar_t* modeName = (modeSel >= 0 && modeSel < _countof(modeNames))
@@ -2400,10 +2417,11 @@ static LRESULT Handle_Command(HWND hWnd, WPARAM wParam, LPARAM lParam)
         case 0: searchMode = SEARCH_EXACT;          break;
         case 1: searchMode = SEARCH_BIGGER;         break;
         case 2: searchMode = SEARCH_SMALLER;        break;
-        case 6: searchMode = SEARCH_UNKNOWN_INITIAL; break;
+        case 3: searchMode = SEARCH_BETWEEN;       break;
+        case 7: searchMode = SEARCH_UNKNOWN_INITIAL; break;
         default:
             MessageBox(g_hWndMain,
-                L"Only 'Exact', 'Bigger', 'Smaller' or 'Unknown Initial' are allowed for first scan.",
+                L"Only 'Exact', 'Bigger', 'Smaller', 'Value Between' or 'Unknown Initial' are allowed for first scan.",
                 L"Error", MB_OK | MB_ICONERROR);
             return 0;
         }
@@ -2419,7 +2437,57 @@ static LRESULT Handle_Command(HWND hWnd, WPARAM wParam, LPARAM lParam)
         if (searchMode != SEARCH_UNKNOWN_INITIAL)
             GetSearchValueFromEdit(searchVal);
 
-        PerformFirstScan(searchVal, dt, searchMode);
+        double singleVal = 0.0;
+        if (searchMode == SEARCH_BETWEEN)
+        {
+            // Look for - in the buffer
+            std::wstring bufW(buffer);
+            size_t dash = bufW.find(L'-');
+            if (dash == std::wstring::npos)
+            {
+                MessageBox(g_hWndMain, L"Value Between must be in the form: lower-upper (e.g. 10-25).",
+                    L"Error", MB_OK | MB_ICONERROR);
+                break;
+            }
+            // Split into two sides, convert to double
+            std::wstring lowStr = bufW.substr(0, dash);
+            std::wstring highStr = bufW.substr(dash + 1);
+            wchar_t* endPtr = nullptr;
+
+            double low = wcstod(lowStr.c_str(), &endPtr);
+            if (endPtr == lowStr.c_str()) {
+                MessageBox(g_hWndMain, L"Could not parse the lower bound.", L"Error", MB_OK | MB_ICONERROR);
+                break;
+            }
+            double high = wcstod(highStr.c_str(), &endPtr);
+            if (endPtr == highStr.c_str()) {
+                MessageBox(g_hWndMain, L"Could not parse the upper bound.", L"Error", MB_OK | MB_ICONERROR);
+                break;
+            }
+            if (low > high) {
+                std::swap(low, high);
+            }
+
+            g_searchLow = low;
+            g_searchHigh = high;
+        }
+        else if (searchMode != SEARCH_UNKNOWN_INITIAL)
+        {
+            // For EXACT/BIGGER/SMALLER: parse a single value
+            GetSearchValueFromEdit(singleVal);
+        }
+
+        // Finally, call PerformFirstScan
+        if (searchMode != SEARCH_UNKNOWN_INITIAL && searchMode != SEARCH_BETWEEN && buffer[0] == L'\0')
+        {
+            // Should never get here, but just in case
+            MessageBox(g_hWndMain, L"A value must be entered to scan.",
+                L"Error", MB_OK | MB_ICONERROR);
+            break;
+        }
+        PerformFirstScan(singleVal, dt, searchMode);
+
+        // 10) Disable First Scan and remove Unknown Initial from the dropdown
         EnableWindow(g_hBtnFirstScan, FALSE);
         EnableWindow(g_hComboValueType, FALSE);
         {
@@ -2458,6 +2526,7 @@ static LRESULT Handle_Command(HWND hWnd, WPARAM wParam, LPARAM lParam)
         case 0: searchMode = SEARCH_EXACT;     break;
         case 1: searchMode = SEARCH_BIGGER;    break;
         case 2: searchMode = SEARCH_SMALLER;   break;
+        case 3: searchMode = SEARCH_BETWEEN;   break;
         case 4: searchMode = SEARCH_INCREASED; break;
         case 5: searchMode = SEARCH_DECREASED; break;
         case 6: searchMode = SEARCH_UNCHANGED; break;
@@ -2470,6 +2539,20 @@ static LRESULT Handle_Command(HWND hWnd, WPARAM wParam, LPARAM lParam)
         DataType dt = static_cast<DataType>(selIndex);
 
         {
+            static const wchar_t* modeNames[] = {
+                L"Exact Value",      // 0
+                L"Bigger Than",      // 1
+                L"Smaller Than",     // 2
+                L"Value Between",    // 3
+                L"Increased Value",  // 4
+                L"Decreased Value",  // 5
+                L"Unchanged Value",  // 6
+                L"Unknown Initial Value" // 7 (should never be chosen here)
+            };
+            const wchar_t* modeName = (modeSel >= 0 && modeSel < _countof(modeNames))
+                ? modeNames[modeSel]
+                : L"Invalid Mode";
+
             std::wstring logLine =
                 L"Next Scan:\r\n"
                 L"  Value = \"" + std::wstring(buffer) + L"\"\r\n"
@@ -2482,7 +2565,7 @@ static LRESULT Handle_Command(HWND hWnd, WPARAM wParam, LPARAM lParam)
         if ((searchMode == SEARCH_INCREASED ||
             searchMode == SEARCH_DECREASED ||
             searchMode == SEARCH_UNCHANGED) &&
-            g_scanPager->Count() == 0)
+            (!g_scanPager || g_scanPager->Count() == 0))
         {
             MessageBox(g_hWndMain,
                 L"You must perform a first scan before this mode.",
@@ -2490,47 +2573,79 @@ static LRESULT Handle_Command(HWND hWnd, WPARAM wParam, LPARAM lParam)
             break;
         }
 
-        double searchVal = 0;
+        double singleVal = 0.0;
         if (searchMode == SEARCH_EXACT ||
             searchMode == SEARCH_BIGGER ||
             searchMode == SEARCH_SMALLER)
         {
             if (buffer[0] == L'\0')
             {
-                MessageBox(g_hWndMain,
-                    L"A value must be entered to scan.",
+                MessageBox(g_hWndMain, L"A value must be entered to scan.",
                     L"Error", MB_OK | MB_ICONERROR);
                 break;
             }
-            GetSearchValueFromEdit(searchVal);
+            GetSearchValueFromEdit(singleVal);
+        }
+        else if (searchMode == SEARCH_BETWEEN)
+        {
+            if (buffer[0] == L'\0')
+            {
+                MessageBox(g_hWndMain, L"A range (low-high) must be entered to scan.",
+                    L"Error", MB_OK | MB_ICONERROR);
+                break;
+            }
+            // Parse low-upper
+            std::wstring bufW(buffer);
+            size_t dash = bufW.find(L'-');
+            if (dash == std::wstring::npos)
+            {
+                MessageBox(g_hWndMain, L"Value Between must be in the form: lower-upper (e.g. 10-25).",
+                    L"Error", MB_OK | MB_ICONERROR);
+                break;
+            }
+            std::wstring lowStr = bufW.substr(0, dash);
+            std::wstring highStr = bufW.substr(dash + 1);
+            wchar_t* endPtr = nullptr;
+
+            double low = wcstod(lowStr.c_str(), &endPtr);
+            if (endPtr == lowStr.c_str())
+            {
+                MessageBox(g_hWndMain, L"Could not parse the lower bound.", L"Error", MB_OK | MB_ICONERROR);
+                break;
+            }
+            double high = wcstod(highStr.c_str(), &endPtr);
+            if (endPtr == highStr.c_str())
+            {
+                MessageBox(g_hWndMain, L"Could not parse the upper bound.", L"Error", MB_OK | MB_ICONERROR);
+                break;
+            }
+            if (low > high) std::swap(low, high);
+            g_searchLow = low;
+            g_searchHigh = high;
         }
 
-        SendMessage(g_hProgressBar, PBM_SETMARQUEE, TRUE, 30);
-        UpdateWindow(g_hProgressBar);
-
-        MSG msg;
+        MSG tempMsg;
         g_previousScanEntries.clear();
-        for (size_t i = 0, tot = g_scanPager->Count(); i < tot; ++i)
+        if (g_scanPager)
         {
-            ScanEntry e;
-            if (g_scanPager->GetEntry(i, e))
-                g_previousScanEntries.push_back(e);
-
-            if ((i % 1000) == 0)
+            for (size_t i = 0, tot = g_scanPager->Count(); i < tot; ++i)
             {
-                while (PeekMessage(&msg, NULL, 0, 0, PM_REMOVE))
+                ScanEntry e;
+                if (g_scanPager->GetEntry(i, e))
+                    g_previousScanEntries.push_back(e);
+
+                if ((i % 1000) == 0)
                 {
-                    TranslateMessage(&msg);
-                    DispatchMessage(&msg);
+                    while (PeekMessage(&tempMsg, NULL, 0, 0, PM_REMOVE))
+                    {
+                        TranslateMessage(&tempMsg);
+                        DispatchMessage(&tempMsg);
+                    }
                 }
             }
         }
 
-        SendMessage(g_hProgressBar, PBM_SETMARQUEE, FALSE, 0);
-        SendMessage(g_hProgressBar, PBM_SETPOS, 0, 0);
-        UpdateWindow(g_hProgressBar);
-
-        PerformNextScan(searchVal, dt, searchMode);
+        PerformNextScan(singleVal, dt, searchMode);
     }
     break;
 
@@ -2817,14 +2932,26 @@ static LRESULT Handle_Command(HWND hWnd, WPARAM wParam, LPARAM lParam)
     {
         if (!g_isPointerScanning)
         {
-            // if "Scan From File" is checked
+            {
+                LONG_PTR style = GetWindowLongPtr(g_hProgressBar, GWL_STYLE);
+                SetWindowLongPtr(
+                    g_hProgressBar,
+                    GWL_STYLE,
+                    style | PBS_MARQUEE
+                );
+            }
+            // Send PBM_SETMARQUEE to turn on the animated marquee (30ms is the interval)
+            SendMessage(g_hProgressBar, PBM_SETMARQUEE, TRUE, 30);
+            UpdateWindow(g_hProgressBar);
+
+            // if Scan From File is checked
             if (IsDlgButtonChecked(hWnd, IDC_CHECK_SCAN_SAVED_FILE) == BST_CHECKED)
             {
                 // enter scanning state
                 g_isPointerScanning = true;
                 SetWindowTextW(g_hBtnPointerScan, L"Stop");
 
-                // disable UI controls during "scan from file"
+                // disable UI controls during scan from file
                 EnableWindow(g_hEditBaseAddress, FALSE);
                 EnableWindow(g_hDynamicAddressEdit, FALSE);
                 EnableWindow(g_hEditMaxDepth, FALSE);
@@ -2832,6 +2959,7 @@ static LRESULT Handle_Command(HWND hWnd, WPARAM wParam, LPARAM lParam)
                 EnableWindow(g_hBtnAddOffset, FALSE);
                 EnableWindow(g_hBtnRemoveOffset, FALSE);
                 EnableWindow(g_hBtnAutoOffset, FALSE);
+                EnableWindow(g_hBtnViewPTRs, FALSE);
                 EnableWindow(GetDlgItem(hWnd, IDC_CHECK_SCAN_SAVED_FILE), FALSE);
 
                 // perform filtering of loaded chains
@@ -2858,7 +2986,7 @@ static LRESULT Handle_Command(HWND hWnd, WPARAM wParam, LPARAM lParam)
                 if (MessageBoxW(hWnd, msg.c_str(), L"Scan From File",
                     MB_YESNO | MB_ICONQUESTION) == IDYES)
                 {
-                    // default output path = original + "_active.MPTR"
+                    // default output path = original + _active.MPTR
                     std::wstring base = g_mptrFilePath.substr(
                         0, g_mptrFilePath.find_last_of(L'.')
                     ) + L"_active.MPTR";
@@ -2898,8 +3026,19 @@ static LRESULT Handle_Command(HWND hWnd, WPARAM wParam, LPARAM lParam)
                 EnableWindow(g_hBtnAddOffset, TRUE);
                 EnableWindow(g_hBtnRemoveOffset, TRUE);
                 EnableWindow(g_hBtnAutoOffset, TRUE);
+                EnableWindow(g_hBtnViewPTRs, TRUE);
                 EnableWindow(GetDlgItem(hWnd, IDC_CHECK_SCAN_SAVED_FILE), TRUE);
+
                 SendMessage(g_hProgressBar, PBM_SETMARQUEE, FALSE, 0);
+                {
+                    LONG_PTR style = GetWindowLongPtr(g_hProgressBar, GWL_STYLE);
+                    SetWindowLongPtr(
+                        g_hProgressBar,
+                        GWL_STYLE,
+                        style & ~PBS_MARQUEE
+                    );
+                }
+                UpdateWindow(g_hProgressBar);
             }
             else
             {
@@ -2914,6 +3053,7 @@ static LRESULT Handle_Command(HWND hWnd, WPARAM wParam, LPARAM lParam)
                 EnableWindow(g_hBtnAddOffset, FALSE);
                 EnableWindow(g_hBtnRemoveOffset, FALSE);
                 EnableWindow(g_hBtnAutoOffset, FALSE);
+                EnableWindow(g_hBtnViewPTRs, FALSE);
                 EnableWindow(GetDlgItem(hWnd, IDC_CHECK_SCAN_SAVED_FILE), FALSE);
 
                 wchar_t baseBuf[64] = { 0 };
@@ -2934,8 +3074,8 @@ static LRESULT Handle_Command(HWND hWnd, WPARAM wParam, LPARAM lParam)
                     EnableWindow(g_hBtnAddOffset, TRUE);
                     EnableWindow(g_hBtnRemoveOffset, TRUE);
                     EnableWindow(g_hBtnAutoOffset, TRUE);
+                    EnableWindow(g_hBtnViewPTRs, TRUE);
                     EnableWindow(GetDlgItem(hWnd, IDC_CHECK_SCAN_SAVED_FILE), TRUE);
-                    SendMessage(g_hProgressBar, PBM_SETMARQUEE, FALSE, 0);
                     break;
                 }
 
@@ -2964,7 +3104,7 @@ static LRESULT Handle_Command(HWND hWnd, WPARAM wParam, LPARAM lParam)
                     g_positionalOffsets.push_back(off);
                 }
 
-                // kick off the pointer‑scan thread
+                // Pointer‑scan thread
                 auto* sp = new PointerScanParams{
                     baseAddr,
                     dynAddr,
@@ -2975,15 +3115,23 @@ static LRESULT Handle_Command(HWND hWnd, WPARAM wParam, LPARAM lParam)
                     PointerScanThreadProc,
                     sp, 0, nullptr
                 );
-
-                // put the progress bar into marquee mode.. ON HOLD WHAT A JOKE
-                // SendMessage(g_hProgressBar, PBM_SETMARQUEE, TRUE, 30);
             }
         }
         else
         {
-            // user clicked “Stop”
+            // user clicked Stop
             g_stopPointerScan = true;
+
+            SendMessage(g_hProgressBar, PBM_SETMARQUEE, FALSE, 0);
+            {
+                LONG_PTR style = GetWindowLongPtr(g_hProgressBar, GWL_STYLE);
+                SetWindowLongPtr(
+                    g_hProgressBar,
+                    GWL_STYLE,
+                    style & ~PBS_MARQUEE
+                );
+            }
+            UpdateWindow(g_hProgressBar);
         }
         break;
     }
@@ -2991,7 +3139,7 @@ static LRESULT Handle_Command(HWND hWnd, WPARAM wParam, LPARAM lParam)
         if (HIWORD(wParam) == BN_CLICKED &&
             IsDlgButtonChecked(hWnd, IDC_CHECK_SCAN_SAVED_FILE) == BST_CHECKED)
         {
-            // 1) Prompt user to select an existing .MPTR file
+            // Prompt user to select an existing .MPTR file
             wchar_t inFile[MAX_PATH] = {};
             OPENFILENAMEW ofn{ sizeof(ofn) };
             ofn.hwndOwner = hWnd;
@@ -3005,7 +3153,7 @@ static LRESULT Handle_Command(HWND hWnd, WPARAM wParam, LPARAM lParam)
                 break;
             }
 
-            // 2) Remember path and load pointer chains into memory
+            // Remember path and load pointer chains into memory
             g_mptrFilePath = inFile;
             g_loadedChains.clear();
             std::wifstream fin(inFile);
@@ -3021,7 +3169,7 @@ static LRESULT Handle_Command(HWND hWnd, WPARAM wParam, LPARAM lParam)
 
     case IDC_BTN_VIEWPTRS:
     {
-        // 1) Prompt for an existing .MPTR file
+        // Prompt for an existing .MPTR file
         wchar_t szFile[MAX_PATH] = {};
         OPENFILENAMEW ofn{ sizeof(ofn) };
         ofn.hwndOwner = g_hWndMain;
@@ -3032,7 +3180,7 @@ static LRESULT Handle_Command(HWND hWnd, WPARAM wParam, LPARAM lParam)
         if (!GetOpenFileNameW(&ofn))
             break;
 
-        // 2) Load each comma‑delimited chain into g_loadedChains
+        // Load each comma‑delimited chain into g_loadedChains
         g_mptrFilePath = szFile;
         g_loadedChains.clear();
         std::wifstream fin(szFile);
@@ -3041,7 +3189,7 @@ static LRESULT Handle_Command(HWND hWnd, WPARAM wParam, LPARAM lParam)
             if (!line.empty())
                 g_loadedChains.push_back(splitPointerExpr(line));
 
-        // 3) Show the pointer‑table dialog
+        // Show the pointer‑table dialog
         ShowPointerTableDialog(g_hWndMain);
     }
     break;
@@ -4061,8 +4209,6 @@ bool PerformFirstScan(double searchVal, DataType dt, SearchMode searchMode)
     g_previousScanEntries.clear();
     g_lastDisplayedEntries.clear();
 
-    SendMessage(g_hProgressBar, PBM_SETMARQUEE, TRUE, 30);
-
     g_scanPager = new ScanResultPager(g_scanResultsFolder, MAPPED_PAGE_ENTRIES, ++g_currentScanId);
     HANDLE hProcess = g_hTargetProcess;
 
@@ -4121,7 +4267,8 @@ bool PerformFirstScan(double searchVal, DataType dt, SearchMode searchMode)
                         match = (searchMode == SEARCH_UNKNOWN_INITIAL)
                             || (searchMode == SEARCH_EXACT && (double)v == searchVal)
                             || (searchMode == SEARCH_BIGGER && (double)v > searchVal)
-                            || (searchMode == SEARCH_SMALLER && (double)v < searchVal);
+                            || (searchMode == SEARCH_SMALLER && (double)v < searchVal)
+                            || (searchMode == SEARCH_BETWEEN && ((double)v >= g_searchLow && (double)v <= g_searchHigh));
                         if (match) e.value.valByte = v;
                     } break;
 
@@ -4130,7 +4277,8 @@ bool PerformFirstScan(double searchVal, DataType dt, SearchMode searchMode)
                         match = (searchMode == SEARCH_UNKNOWN_INITIAL)
                             || (searchMode == SEARCH_EXACT && (double)v == searchVal)
                             || (searchMode == SEARCH_BIGGER && (double)v > searchVal)
-                            || (searchMode == SEARCH_SMALLER && (double)v < searchVal);
+                            || (searchMode == SEARCH_SMALLER && (double)v < searchVal)
+                            || (searchMode == SEARCH_BETWEEN && ((double)v >= g_searchLow && (double)v <= g_searchHigh));
                         if (match) e.value.val2Byte = v;
                     } break;
 
@@ -4139,7 +4287,8 @@ bool PerformFirstScan(double searchVal, DataType dt, SearchMode searchMode)
                         match = (searchMode == SEARCH_UNKNOWN_INITIAL)
                             || (searchMode == SEARCH_EXACT && (double)v == searchVal)
                             || (searchMode == SEARCH_BIGGER && (double)v > searchVal)
-                            || (searchMode == SEARCH_SMALLER && (double)v < searchVal);
+                            || (searchMode == SEARCH_SMALLER && (double)v < searchVal)
+                            || (searchMode == SEARCH_BETWEEN && ((double)v >= g_searchLow && (double)v <= g_searchHigh));
                         if (match) e.value.val4Byte = v;
                     } break;
 
@@ -4148,7 +4297,8 @@ bool PerformFirstScan(double searchVal, DataType dt, SearchMode searchMode)
                         match = (searchMode == SEARCH_UNKNOWN_INITIAL)
                             || (searchMode == SEARCH_EXACT && (double)v == searchVal)
                             || (searchMode == SEARCH_BIGGER && (double)v > searchVal)
-                            || (searchMode == SEARCH_SMALLER && (double)v < searchVal);
+                            || (searchMode == SEARCH_SMALLER && (double)v < searchVal)
+                            || (searchMode == SEARCH_BETWEEN && ((double)v >= g_searchLow && (double)v <= g_searchHigh));
                         if (match) e.value.val8Byte = v;
                     } break;
 
@@ -4157,7 +4307,8 @@ bool PerformFirstScan(double searchVal, DataType dt, SearchMode searchMode)
                         match = (searchMode == SEARCH_UNKNOWN_INITIAL)
                             || (searchMode == SEARCH_EXACT && fabs((double)v - searchVal) < epsilon_float)
                             || (searchMode == SEARCH_BIGGER && (double)v > searchVal)
-                            || (searchMode == SEARCH_SMALLER && (double)v < searchVal);
+                            || (searchMode == SEARCH_SMALLER && (double)v < searchVal)
+                            || (searchMode == SEARCH_BETWEEN && ((double)v >= g_searchLow && (double)v <= g_searchHigh));
                         if (match) {
                             if (v == 0.0f)
                                 v = 0.0f;
@@ -4170,7 +4321,8 @@ bool PerformFirstScan(double searchVal, DataType dt, SearchMode searchMode)
                         match = (searchMode == SEARCH_UNKNOWN_INITIAL)
                             || (searchMode == SEARCH_EXACT && fabs(v - searchVal) < epsilon_double)
                             || (searchMode == SEARCH_BIGGER && v > searchVal)
-                            || (searchMode == SEARCH_SMALLER && v < searchVal);
+                            || (searchMode == SEARCH_SMALLER && v < searchVal)
+                            || (searchMode == SEARCH_BETWEEN && (v >= g_searchLow && v <= g_searchHigh));
                         if (match) {
                             if (v == 0.0)
                                 v = 0.0;
@@ -4220,8 +4372,6 @@ bool PerformFirstScan(double searchVal, DataType dt, SearchMode searchMode)
     for (auto& th : workers) th.join();
     SendMessage(g_hProgressBar, PBM_SETPOS, 100, 0);
     UpdateWindow(g_hProgressBar);
-
-    SendMessage(g_hProgressBar, PBM_SETMARQUEE, FALSE, 0);
 
     for (auto& vec : results)
         for (auto& e : vec)
@@ -4362,6 +4512,14 @@ bool PerformNextScan(double searchVal, DataType dt, SearchMode searchMode)
         return true;
     }
 
+    LONG_PTR origStyle = GetWindowLongPtr(g_hProgressBar, GWL_STYLE);
+    SetWindowLongPtr(
+        g_hProgressBar,
+        GWL_STYLE,
+        origStyle | PBS_MARQUEE
+    );
+
+    EnableWindow(g_hWndMain, FALSE);
     SendMessage(g_hProgressBar, PBM_SETMARQUEE, TRUE, 30);
     UpdateWindow(g_hProgressBar);
 
@@ -4383,11 +4541,19 @@ bool PerformNextScan(double searchVal, DataType dt, SearchMode searchMode)
         }
     }
 
+    ScanResultPager* newPager = new ScanResultPager(g_scanResultsFolder, MAPPED_PAGE_ENTRIES, ++g_currentScanId);
+
     SendMessage(g_hProgressBar, PBM_SETMARQUEE, FALSE, 0);
     SendMessage(g_hProgressBar, PBM_SETPOS, 0, 0);
     UpdateWindow(g_hProgressBar);
+    EnableWindow(g_hWndMain, TRUE);
 
-    ScanResultPager* newPager = new ScanResultPager(g_scanResultsFolder, MAPPED_PAGE_ENTRIES, ++g_currentScanId);
+    SetWindowLongPtr(
+        g_hProgressBar,
+        GWL_STYLE,
+        origStyle
+    );
+
     size_t totalCount = g_scanPager->Count();
     unsigned numThreads = std::thread::hardware_concurrency();
     if (!numThreads) numThreads = 2;
@@ -4420,9 +4586,11 @@ bool PerformNextScan(double searchVal, DataType dt, SearchMode searchMode)
                         (searchMode == SEARCH_DECREASED && c < p) ||
                         (searchMode == SEARCH_EXACT && c == searchVal) ||
                         (searchMode == SEARCH_BIGGER && c > searchVal) ||
-                        (searchMode == SEARCH_SMALLER && c < searchVal))
+                        (searchMode == SEARCH_SMALLER && c < searchVal) ||
+                        (searchMode == SEARCH_BETWEEN && (c >= g_searchLow && c <= g_searchHigh)))
                     {
-                        valid = true; e.value.valByte = v;
+                        valid = true;
+                        e.value.valByte = v;
                     }
                 }
             } break;
@@ -4435,9 +4603,11 @@ bool PerformNextScan(double searchVal, DataType dt, SearchMode searchMode)
                         (searchMode == SEARCH_DECREASED && c < p) ||
                         (searchMode == SEARCH_EXACT && c == searchVal) ||
                         (searchMode == SEARCH_BIGGER && c > searchVal) ||
-                        (searchMode == SEARCH_SMALLER && c < searchVal))
+                        (searchMode == SEARCH_SMALLER && c < searchVal) ||
+                        (searchMode == SEARCH_BETWEEN && (c >= g_searchLow && c <= g_searchHigh)))
                     {
-                        valid = true; e.value.val2Byte = v;
+                        valid = true;
+                        e.value.val2Byte = v;
                     }
                 }
             } break;
@@ -4450,9 +4620,11 @@ bool PerformNextScan(double searchVal, DataType dt, SearchMode searchMode)
                         (searchMode == SEARCH_DECREASED && c < p) ||
                         (searchMode == SEARCH_EXACT && c == searchVal) ||
                         (searchMode == SEARCH_BIGGER && c > searchVal) ||
-                        (searchMode == SEARCH_SMALLER && c < searchVal))
+                        (searchMode == SEARCH_SMALLER && c < searchVal) ||
+                        (searchMode == SEARCH_BETWEEN && (c >= g_searchLow && c <= g_searchHigh)))
                     {
-                        valid = true; e.value.val4Byte = v;
+                        valid = true;
+                        e.value.val4Byte = v;
                     }
                 }
             } break;
@@ -4465,9 +4637,11 @@ bool PerformNextScan(double searchVal, DataType dt, SearchMode searchMode)
                         (searchMode == SEARCH_DECREASED && c < p) ||
                         (searchMode == SEARCH_EXACT && c == searchVal) ||
                         (searchMode == SEARCH_BIGGER && c > searchVal) ||
-                        (searchMode == SEARCH_SMALLER && c < searchVal))
+                        (searchMode == SEARCH_SMALLER && c < searchVal) ||
+                        (searchMode == SEARCH_BETWEEN && (c >= g_searchLow && c <= g_searchHigh)))
                     {
-                        valid = true; e.value.val8Byte = v;
+                        valid = true;
+                        e.value.val8Byte = v;
                     }
                 }
             } break;
@@ -4482,13 +4656,12 @@ bool PerformNextScan(double searchVal, DataType dt, SearchMode searchMode)
                         (searchMode == SEARCH_DECREASED && delta < -epsilon_float) ||
                         (searchMode == SEARCH_EXACT && fabs(c - searchVal) < epsilon_float) ||
                         (searchMode == SEARCH_BIGGER && c > searchVal) ||
-                        (searchMode == SEARCH_SMALLER && c < searchVal))
+                        (searchMode == SEARCH_SMALLER && c < searchVal) ||
+                        (searchMode == SEARCH_BETWEEN && (c >= g_searchLow && c <= g_searchHigh)))
                     {
                         valid = true;
-
                         if (v == 0.0f)
                             v = 0.0f;
-
                         e.value.valFloat = v;
                     }
                 }
@@ -4505,13 +4678,12 @@ bool PerformNextScan(double searchVal, DataType dt, SearchMode searchMode)
                         (searchMode == SEARCH_DECREASED && delta < -epsilon_double) ||
                         (searchMode == SEARCH_EXACT && fabs(c - searchVal) < epsilon_double) ||
                         (searchMode == SEARCH_BIGGER && c > searchVal) ||
-                        (searchMode == SEARCH_SMALLER && c < searchVal))
+                        (searchMode == SEARCH_SMALLER && c < searchVal) ||
+                        (searchMode == SEARCH_BETWEEN && (c >= g_searchLow && c <= g_searchHigh)))
                     {
                         valid = true;
-
                         if (v == 0.0)
                             v = 0.0;
-
                         e.value.valDouble = v;
                     }
                 }
@@ -4846,7 +5018,7 @@ DWORD WINAPI PointerScanThreadProc(LPVOID lpParam)
             wsprintfW(defaultPath,
                 L"%s\\%s.MPTR",
                 pointersDir.c_str(),
-                name.c_str());  // 'name' is the process/base-name
+                name.c_str());
 
             OPENFILENAMEW ofn{ sizeof(ofn) };
             wchar_t szFile[MAX_PATH] = { 0 };
@@ -4863,7 +5035,7 @@ DWORD WINAPI PointerScanThreadProc(LPVOID lpParam)
             if (GetSaveFileNameW(&ofn)) {
                 std::wofstream ofs(ofn.lpstrFile, std::ios::trunc);
 
-                // 1) Grab the module name and base address
+                // Grab the module name and base address
                 wchar_t moduleName[MAX_PATH] = { 0 };
                 uintptr_t moduleBase = 0;
                 {
@@ -4877,7 +5049,7 @@ DWORD WINAPI PointerScanThreadProc(LPVOID lpParam)
                     }
                 }
 
-                // 2) For each pointer‐chain, compute and write baseExpr + offsets
+                // For each pointer‐chain, compute and write baseExpr + offsets
                 for (auto& chain : allResults) {
                     std::wstring baseExpr;
                     if (g_unrealDetected) {
@@ -5419,12 +5591,12 @@ static void TryResolveUnrealOnProcess(HANDLE hProcess)
 
 static void SearchPositionalPointerPaths()
 {
-    // 1) Always start with Auto disabled
+    // Always start with Auto disabled
     EnableWindow(g_hBtnAutoOffset, FALSE);
 
     Log(L"\r\n +Scanning for Base‑Offset candidates…\r\n");
 
-    // 2) Grab the UWorld pointer
+    // Grab the UWorld pointer
     HANDLE    hProc = g_hTargetProcess;
     uintptr_t worldPtr = g_resolvedBaseAddress;
     uintptr_t basePtr = 0;
@@ -5470,7 +5642,7 @@ static void SearchPositionalPointerPaths()
         );
     }
 
-    // 5) Only enable “Auto” if we actually found candidates
+    // Only enable “Auto” if we actually found candidates
     if (!g_autoOffsets.empty())
     {
         EnableWindow(g_hBtnAutoOffset, TRUE);
