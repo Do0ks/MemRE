@@ -8,10 +8,15 @@ MemRE is an injectable memory editor with Unreal Engine support! MemRE has an op
 ### Known Issues/Fixes + Nightly Builds:
 <Details>
 
-### Discord Nightly Builds:  
+- Added Marquee while pointer scanner is running.  
 
-- Added a Marquee indicator to the progress bar between scans to help indicate the program is thinking.
-- Added a safe guard while Marquee is enabled to prevent interaction with the scanner until the Marquee is complete.  
+- Added "Value Between" option to scan parameters.  
+
+Formatting: Number-Number  
+
+10-25 will show results for addresses that hold numbers 10 through 25 in 1-8 Bytes  
+
+10.1-10.5 will show results for addresses that hold numbers 10.1 through 10.5 in Double/Float  
 
 </Details>
 
