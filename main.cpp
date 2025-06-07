@@ -171,6 +171,7 @@ enum SearchMode {
     SEARCH_UNKNOWN_INITIAL,
     SEARCH_INCREASED,
     SEARCH_DECREASED,
+    SEARCH_CHANGED,
     SEARCH_UNCHANGED
 };
 
@@ -1729,8 +1730,7 @@ static LRESULT Handle_Create(HWND hWnd, LPARAM lParam)
         btnX + comboW + gap, comboY, comboW, comboH, hWnd, (HMENU)IDC_COMBO_SEARCHMODE, hInst, NULL
     );
     for (auto* s : { L"Exact Value",L"Bigger Than",L"Smaller Than",
-                     L"Value Between", L"Increased Value", L"Decreased Value",
-                     L"Unchanged Value", L"Unknown Initial Value" })
+                     L"Value Between", L"Unknown Initial Value" })
         SendMessageW(hComboSearch, CB_ADDSTRING, 0, (LPARAM)s);
     SendMessageW(hComboSearch, CB_SETCURSEL, 0, 0);
 
@@ -2367,8 +2367,8 @@ static LRESULT Handle_Command(HWND hWnd, WPARAM wParam, LPARAM lParam)
     {
         HWND hComboSearchMode = GetDlgItem(hWnd, IDC_COMBO_SEARCHMODE);
         LRESULT sel = SendMessage(hComboSearchMode, CB_GETCURSEL, 0, 0);
-        // disable the edit box only for modes 4..7 (Increased, Decreased, Unchanged, Unknown)
-        if (sel >= 4 && sel <= 7)
+        
+        if (sel >= 4 && sel <= 8)
         {
             EnableWindow(g_hEditValue, FALSE);
             SetWindowText(g_hEditValue, L"");
@@ -2418,8 +2418,9 @@ static LRESULT Handle_Command(HWND hWnd, WPARAM wParam, LPARAM lParam)
         case 1: searchMode = SEARCH_BIGGER;         break;
         case 2: searchMode = SEARCH_SMALLER;        break;
         case 3: searchMode = SEARCH_BETWEEN;       break;
-        case 7: searchMode = SEARCH_UNKNOWN_INITIAL; break;
+        case 4: searchMode = SEARCH_UNKNOWN_INITIAL; break;
         default:
+			// Now you should never see this error again, but just in case..
             MessageBox(g_hWndMain,
                 L"Only 'Exact', 'Bigger', 'Smaller', 'Value Between' or 'Unknown Initial' are allowed for first scan.",
                 L"Error", MB_OK | MB_ICONERROR);
@@ -2487,17 +2488,31 @@ static LRESULT Handle_Command(HWND hWnd, WPARAM wParam, LPARAM lParam)
         }
         PerformFirstScan(singleVal, dt, searchMode);
 
-        // 10) Disable First Scan and remove Unknown Initial from the dropdown
+        // Disable First Scan and remove Unknown Initial from the dropdown
         EnableWindow(g_hBtnFirstScan, FALSE);
         EnableWindow(g_hComboValueType, FALSE);
         {
             HWND hComboSearch = GetDlgItem(g_hWndMain, IDC_COMBO_SEARCHMODE);
-            int idx = (int)SendMessageW(hComboSearch,
-                CB_FINDSTRINGEXACT,
-                (WPARAM)-1,
-                (LPARAM)L"Unknown Initial Value");
+            int idx = (int)SendMessageW(hComboSearch, CB_FINDSTRINGEXACT, (WPARAM)-1, (LPARAM)L"Unknown Initial Value");
+
             if (idx != CB_ERR)
                 SendMessageW(hComboSearch, CB_DELETESTRING, (WPARAM)idx, 0);
+
+            int vbIdx = (int)SendMessageW(
+                hComboSearch,
+                CB_FINDSTRINGEXACT,
+                (WPARAM)-1,
+                (LPARAM)L"Value Between"
+            );
+
+            const wchar_t* nextModes[] = {
+                L"Increased Value", L"Decreased Value",
+                L"Changed Value", L"Unchanged Value"};
+
+            for (int i = 0; i < 4; ++i) {
+                // insert each one in the original order
+                SendMessageW(hComboSearch, CB_INSERTSTRING, (WPARAM)(vbIdx + 1 + i), (LPARAM)nextModes[i]);
+            }
         }
     }
     break;
@@ -2529,7 +2544,8 @@ static LRESULT Handle_Command(HWND hWnd, WPARAM wParam, LPARAM lParam)
         case 3: searchMode = SEARCH_BETWEEN;   break;
         case 4: searchMode = SEARCH_INCREASED; break;
         case 5: searchMode = SEARCH_DECREASED; break;
-        case 6: searchMode = SEARCH_UNCHANGED; break;
+        case 6: searchMode = SEARCH_CHANGED;     break;
+        case 7: searchMode = SEARCH_UNCHANGED; break;
         default:
             MessageBox(g_hWndMain, L"Invalid search mode.", L"Error", MB_OK | MB_ICONERROR);
             return 0;
@@ -2540,14 +2556,9 @@ static LRESULT Handle_Command(HWND hWnd, WPARAM wParam, LPARAM lParam)
 
         {
             static const wchar_t* modeNames[] = {
-                L"Exact Value",      // 0
-                L"Bigger Than",      // 1
-                L"Smaller Than",     // 2
-                L"Value Between",    // 3
-                L"Increased Value",  // 4
-                L"Decreased Value",  // 5
-                L"Unchanged Value",  // 6
-                L"Unknown Initial Value" // 7 (should never be chosen here)
+                L"Exact Value", L"Bigger Than", L"Smaller Than",
+                L"Value Between", L"Increased Value", L"Decreased Value",
+                L"Unchanged Value", L"Unknown Initial Value" // 7 (should never be chosen here, but..)
             };
             const wchar_t* modeName = (modeSel >= 0 && modeSel < _countof(modeNames))
                 ? modeNames[modeSel]
@@ -2694,13 +2705,30 @@ static LRESULT Handle_Command(HWND hWnd, WPARAM wParam, LPARAM lParam)
         UpdateScanButtons(false);
         EnableWindow(g_hBtnFirstScan, TRUE);
         EnableWindow(g_hComboValueType, TRUE);
+        SendMessageW(g_hComboValueType, CB_SETCURSEL, 2, 0);
         {
             HWND hComboSearch = GetDlgItem(g_hWndMain, IDC_COMBO_SEARCHMODE);
+            SendMessageW(hComboSearch, CB_SETCURSEL, 0, 0);
             int count = (int)SendMessageW(hComboSearch, CB_GETCOUNT, 0, 0);
             SendMessageW(hComboSearch,
                 CB_INSERTSTRING,
                 (WPARAM)count,
                 (LPARAM)L"Unknown Initial Value");
+
+            const wchar_t* nextModes[] = {
+                L"Increased Value", L"Decreased Value",
+                L"Changed Value", L"Unchanged Value"};
+
+            for (auto* m : nextModes) {
+                int idx = (int)SendMessageW(
+                    hComboSearch,
+                    CB_FINDSTRINGEXACT,
+                    (WPARAM)-1,
+                    (LPARAM)m
+                );
+                if (idx != CB_ERR)
+                    SendMessageW(hComboSearch, CB_DELETESTRING, (WPARAM)idx, 0);
+            }
         }
         break;
 
@@ -2940,7 +2968,7 @@ static LRESULT Handle_Command(HWND hWnd, WPARAM wParam, LPARAM lParam)
                     style | PBS_MARQUEE
                 );
             }
-            // Send PBM_SETMARQUEE to turn on the animated marquee (30ms is the interval)
+            // Send PBM_SETMARQUEE to turn on the animated marquee
             SendMessage(g_hProgressBar, PBM_SETMARQUEE, TRUE, 30);
             UpdateWindow(g_hProgressBar);
 
@@ -4401,6 +4429,122 @@ bool PerformNextScan(double searchVal, DataType dt, SearchMode searchMode)
 {
     HANDLE hProcess = g_hTargetProcess;
 
+    if (searchMode == SEARCH_CHANGED)
+    {
+        if (g_previousScanEntries.empty())
+        {
+            MessageBox(g_hWndMain,
+                L"A previous scan must be performed before using 'Changed Value'.",
+                L"Error", MB_OK | MB_ICONERROR);
+            return false;
+        }
+
+        // Prepare a new pager for results
+        ScanResultPager* newPager = new ScanResultPager(
+            g_scanResultsFolder,
+            MAPPED_PAGE_ENTRIES,
+            ++g_currentScanId
+        );
+
+        // Iterate all previous candidates
+        for (size_t i = 0; i < g_previousScanEntries.size(); ++i)
+        {
+            const ScanEntry& prev = g_previousScanEntries[i];
+            ScanEntry curr = prev;
+            bool valid = false;
+
+            switch (dt)
+            {
+            case DATA_BYTE:
+            {
+                uint8_t v = 0;
+                if (ReadProcessMemory(hProcess, (LPCVOID)prev.address, &v, sizeof(v), nullptr))
+                {
+                    if (v != prev.value.valByte) valid = true;
+                    curr.value.valByte = v;
+                }
+            } break;
+
+            case DATA_2BYTE:
+            {
+                uint16_t v = 0;
+                if (ReadProcessMemory(hProcess, (LPCVOID)prev.address, &v, sizeof(v), nullptr))
+                {
+                    if (v != prev.value.val2Byte) valid = true;
+                    curr.value.val2Byte = v;
+                }
+            } break;
+
+            case DATA_4BYTE:
+            {
+                uint32_t v = 0;
+                if (ReadProcessMemory(hProcess, (LPCVOID)prev.address, &v, sizeof(v), nullptr))
+                {
+                    if (v != prev.value.val4Byte) valid = true;
+                    curr.value.val4Byte = v;
+                }
+            } break;
+
+            case DATA_8BYTE:
+            {
+                uint64_t v = 0;
+                if (ReadProcessMemory(hProcess, (LPCVOID)prev.address, &v, sizeof(v), nullptr))
+                {
+                    if (v != prev.value.val8Byte) valid = true;
+                    curr.value.val8Byte = v;
+                }
+            } break;
+
+            case DATA_FLOAT:
+            {
+                float v = 0.0f;
+                if (ReadProcessMemory(hProcess, (LPCVOID)prev.address, &v, sizeof(v), nullptr))
+                {
+                    if (fabs(v - prev.value.valFloat) > epsilon_float) valid = true;
+                    curr.value.valFloat = v;
+                }
+            } break;
+
+            case DATA_DOUBLE:
+            {
+                double v = 0.0;
+                if (ReadProcessMemory(hProcess, (LPCVOID)prev.address, &v, sizeof(v), nullptr))
+                {
+                    if (fabs(v - prev.value.valDouble) > epsilon_double) valid = true;
+                    curr.value.valDouble = v;
+                }
+            } break;
+
+            default:
+                break;
+            }
+
+            if (valid)
+            {
+                newPager->Append(curr);
+            }
+        }
+
+        // Push old pager onto undo stack and replace
+        g_undoStack.push_back(g_scanPager);
+        g_scanPager = newPager;
+
+        // Rebuild previous‐scan entries
+        g_previousScanEntries.clear();
+        size_t total = g_scanPager->Count();
+        g_previousScanEntries.reserve(total);
+        for (size_t i = 0; i < total; ++i)
+        {
+            ScanEntry e;
+            if (g_scanPager->GetEntry(i, e))
+                g_previousScanEntries.push_back(e);
+        }
+
+        // Refresh UI
+        UpdateScanResultsListView();
+        return true;
+    }
+
     if (searchMode == SEARCH_UNCHANGED)
     {
         if (g_previousScanEntries.empty())
@@ -5642,7 +5786,7 @@ static void SearchPositionalPointerPaths()
         );
     }
 
-    // Only enable “Auto” if we actually found candidates
+    // Only enable Auto if we actually found candidates
     if (!g_autoOffsets.empty())
     {
         EnableWindow(g_hBtnAutoOffset, TRUE);
