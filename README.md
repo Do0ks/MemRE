@@ -8,9 +8,9 @@ MemRE is an injectable memory editor with Unreal Engine support! MemRE has an op
 ### Known Issues/Fixes + Nightly Builds:
 <Details>
 
-- Added Marquee while pointer scanner is running.  
+- Added: "Changed Value" option to scan parameters.
 
-- Added "Value Between" option to scan parameters.  
+- Reconfigured: Search options to match the corresponding searches being preformed. Also, 4 Bytes and Exact Value is now the "New Scan" defaults. 
 
 Formatting: Number-Number  
 
