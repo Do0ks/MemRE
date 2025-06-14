@@ -36,6 +36,7 @@
 #include <TlHelp32.h>
 #include <Psapi.h>
 #include <uxtheme.h>
+#include <shellapi.h>
 
 /* Preprocessor includes */
 #include "resource.h"
@@ -67,6 +68,9 @@
 #define ID_MENU_ATTACH             300
 #define ID_MENU_PROCINFO           301
 #define ID_MENU_THREAD             302
+#define ID_MENU_SETTINGS           303
+#define ID_MENU_HOTKEYS            304
+#define ID_MENU_SUPPORT            305
 #define IDM_COPY_MODULE_ADDR       40001
 
 /*=========== Main Window Buttons ===========*/
@@ -140,6 +144,7 @@
 #define IDC_CLEAR_LOGS             701
 #define IDC_LOG_COPY               702
 #define IDC_LOG_SELECTALL          703
+#define IDC_LOG_PIN                704
 
 /*===========General Constants==========*/
 const size_t MAX_UNKNOWN_CANDIDATES = 400000000;
@@ -401,6 +406,8 @@ static bool            s_errorPromptShown = false;
 static WNDPROC         g_oldOffsetEditProc = nullptr;
 static WNDPROC         g_oldOffsetsProc = nullptr;
 WNDPROC                g_oldLogProc = nullptr;
+static bool            g_logPinned = false;
+static size_t          g_pinnedLogLength = 0;
 static WNDPROC         g_oldBaseAddrProc = NULL;
 
 // — Numerical tolerances
@@ -1566,13 +1573,26 @@ static LRESULT Handle_Create(HWND hWnd, LPARAM lParam)
     mii.dwTypeData = const_cast<LPWSTR>(L"Inject");
     InsertMenuItemW(hMenu, 1, TRUE, &mii);
 
+    mii.fMask = MIIM_FTYPE | MIIM_STATE | MIIM_STRING;
+    mii.fType = MFT_STRING;
+    mii.fState = MFS_DISABLED;
+    mii.dwTypeData = const_cast<LPWSTR>(L"│");
+    InsertMenuItemW(hMenu, 2, TRUE, &mii);
+
+    mii.fMask = MIIM_FTYPE | MIIM_ID | MIIM_STRING;
+    mii.fType = MFT_STRING;
+    mii.wID = ID_MENU_SETTINGS;
+    mii.dwTypeData = const_cast<LPWSTR>(L"Settings");
+    InsertMenuItemW(hMenu, 3, TRUE, &mii);
+
     mii.fMask = MIIM_FTYPE | MIIM_ID | MIIM_STRING;
     mii.fType = MFT_STRING | MFT_RIGHTJUSTIFY;
     mii.wID = ID_MENU_PROCINFO;
     mii.dwTypeData = const_cast<LPWSTR>(L"");
-    InsertMenuItemW(hMenu, 2, TRUE, &mii);
+    InsertMenuItemW(hMenu, 4, TRUE, &mii);
 
     SetMenu(hWnd, hMenu);
+    DrawMenuBar(hWnd);
 
     {
         wchar_t fullPath[MAX_PATH] = {};
@@ -2667,6 +2687,20 @@ static LRESULT Handle_Command(HWND hWnd, WPARAM wParam, LPARAM lParam)
     case IDC_BTN_NEWSCAN:
         ResetScans();
 
+        if (g_pinnedLogLength > 0)
+        {
+            // preserve only the first g_pinnedLogLength chars
+            int total = GetWindowTextLengthW(g_hOutputLog);
+            std::wstring all(total, L'\0');
+            GetWindowTextW(g_hOutputLog, &all[0], total + 1);
+
+            std::wstring keep = all.substr(0, g_pinnedLogLength);
+            SetWindowTextW(g_hOutputLog, keep.c_str());
+
+            // scroll to the end of the pinned section
+            SendMessageW(g_hOutputLog, WM_VSCROLL, SB_BOTTOM, 0);
+        }
+        else
         {
             int totalLen = GetWindowTextLengthW(g_hOutputLog);
             std::vector<wchar_t> buf(totalLen + 1);
@@ -3347,6 +3381,52 @@ static LRESULT Handle_Command(HWND hWnd, WPARAM wParam, LPARAM lParam)
         RedrawWindow(g_hOutputLog, nullptr, nullptr, RDW_INVALIDATE | RDW_UPDATENOW);
     }
     break;
+    case ID_MENU_SETTINGS:
+    {
+        HMENU hPopup = CreatePopupMenu();
+        AppendMenuW(hPopup, MF_STRING, ID_MENU_HOTKEYS, L"Hotkeys");
+        AppendMenuW(hPopup, MF_STRING, ID_MENU_SUPPORT, L"Support");
+
+        POINT pt;
+        GetCursorPos(&pt);
+        TrackPopupMenu(hPopup,
+            TPM_LEFTALIGN | TPM_TOPALIGN,
+            pt.x, pt.y,
+            0, hWnd, NULL);
+        DestroyMenu(hPopup);
+    }
+    break;
+
+    case ID_MENU_HOTKEYS:
+        // TODO: open your Hotkeys dialog
+        MessageBoxW(hWnd, L"Hotkeys settings coming soon…", L"Settings – Hotkeys", MB_OK);
+        break;
+
+    case ID_MENU_SUPPORT:
+    {
+        // Configure the Task Dialog
+        TASKDIALOGCONFIG tdc = {};
+        tdc.cbSize = sizeof(tdc);
+        tdc.hwndParent = hWnd;
+        tdc.dwFlags = TDF_ENABLE_HYPERLINKS;
+        tdc.pszWindowTitle = L"Settings – Support";
+        tdc.pszMainInstruction = L"Need Support?";
+        tdc.pszContent =
+            L"Visit <a href=\"https://memre.io\">memre.io</a> or join MemRE "
+            L"<a href=\"https://discord.gg/7nGkqwdJhn\">Discord</a>.";
+
+        // Callback to catch hyperlink clicks
+        tdc.pfCallback = [](HWND, UINT notification, WPARAM wp, LPARAM lp, LONG_PTR) -> HRESULT {
+            if (notification == TDN_HYPERLINK_CLICKED) {
+                LPCWSTR uri = reinterpret_cast<LPCWSTR>(lp);
+                ShellExecuteW(NULL, L"open", uri, NULL, NULL, SW_SHOWNORMAL);
+            }
+            return S_OK;
+        };
+
+        TaskDialogIndirect(&tdc, nullptr, nullptr, nullptr);
+    }
+    break;
     default:
         return DefWindowProcW(hWnd, WM_COMMAND, wParam, lParam);
     }
@@ -3966,12 +4046,16 @@ LRESULT CALLBACK LogEditProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
         HMENU hMenu = CreatePopupMenu();
         AppendMenuW(hMenu, MF_STRING, IDC_LOG_COPY, L"Copy");
         AppendMenuW(hMenu, MF_STRING, IDC_LOG_SELECTALL, L"Select All");
+        AppendMenuW(hMenu, MF_STRING, IDC_LOG_PIN, L"Pin Log");
+        AppendMenuW(hMenu, MF_SEPARATOR, 0, NULL);
         AppendMenuW(hMenu, MF_STRING, IDC_CLEAR_LOGS, L"Clear Logs");
 
-        POINT pt = { GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
-        if (pt.x == -1 && pt.y == -1) {
-            RECT rc; GetWindowRect(hwnd, &rc);
-            pt.x = rc.left + 5;  pt.y = rc.top + 5;
+        POINT pt;
+        if (GET_X_LPARAM(lParam) == -1 && GET_Y_LPARAM(lParam) == -1)
+            GetCursorPos(&pt);
+        else {
+            pt.x = GET_X_LPARAM(lParam);
+            pt.y = GET_Y_LPARAM(lParam);
         }
         TrackPopupMenu(hMenu, TPM_RIGHTBUTTON, pt.x, pt.y, 0, hwnd, NULL);
         DestroyMenu(hMenu);
@@ -3989,8 +4073,21 @@ LRESULT CALLBACK LogEditProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
             SendMessageW(hwnd, EM_SETSEL, 0, -1);
             break;
 
+        case IDC_LOG_PIN:
+        {
+            // 1) append a marker
+            Log(L"Logs Pinned\r\n\r\n");
+            RedrawWindow(g_hOutputLog, nullptr, nullptr, RDW_INVALIDATE | RDW_UPDATENOW);
+
+            // 2) remember everything up to here
+            g_pinnedLogLength = GetWindowTextLengthW(g_hOutputLog);
+
+            return 0;
+        }
+
         case IDC_CLEAR_LOGS:
             SetWindowTextW(g_hOutputLog, L"MemRE Logs:\r\n\r\n");
+            g_pinnedLogLength = 0;
             break;
         }
         return 0;
@@ -5873,7 +5970,7 @@ DWORD WINAPI MainThread(LPVOID lpParam)
 
     CleanupDatFiles(g_scanResultsFolder);
 
-    INITCOMMONCONTROLSEX icex = { sizeof(icex), ICC_WIN95_CLASSES };
+    INITCOMMONCONTROLSEX icex = { sizeof(icex), ICC_WIN95_CLASSES | ICC_STANDARD_CLASSES };
     InitCommonControlsEx(&icex);
 
     g_hWndMain = CreateWindowExW(
