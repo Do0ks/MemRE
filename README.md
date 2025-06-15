@@ -6,20 +6,7 @@ MemRE is an injectable memory editor with Unreal Engine support! MemRE has an op
 ###### Precompiled download comes with MemRE and MemRE Loader.
 ### For more information, join MemRE Discord for full documentation, nightly builds, tutorials, etc. I also push bug fixes there first: https://discord.gg/7nGkqwdJhn
 
-### Known Issues/Fixes + Nightly Builds:
-<Details>
-
-- Added: "Changed Value" option to scan parameters.
-
-- Reconfigured: Search options to match the corresponding searches being preformed. Also, 4 Bytes and Exact Value is now the "New Scan" defaults. 
-
-Formatting: Number-Number  
-
-10-25 will show results for addresses that hold numbers 10 through 25 in 1-8 Bytes  
-
-10.1-10.5 will show results for addresses that hold numbers 10.1 through 10.5 in Double/Float  
-
-</Details>
+### Known Issues/Fixes + Nightly Builds are now listed on [MemREs website](https://memre.io/)   
 
 <a href="http://www.youtube.com/watch?feature=player_embedded&v=ohHAiqsSopQ
 " target="_blank"><img src="http://img.youtube.com/vi/ohHAiqsSopQ/0.jpg" 
@@ -28,7 +15,7 @@ alt="MemRE" width="640" height="580" border="1" /></a>
 ### Looking for MemRE Launcher? you can find The MemRE Loader source here: https://github.com/Do0ks/MemRELoader
 ### Looking for A Easy Injector?: https://github.com/Do0ks/Injector
 
-Demos/Pictures:
+Demos/Pictures (More On [MemREs Website](https://memre.io/)):
 <Details>
   
 https://youtu.be/ohHAiqsSopQ
