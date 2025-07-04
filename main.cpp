@@ -23,10 +23,12 @@
 #include <sstream>
 #include <string>
 #include <thread>
+#include <map>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
 #include <queue>
+#include <cwctype>
 
 /* Win32 / COMCTL */
 #include <windows.h>
@@ -44,107 +46,13 @@
 #include "UEVersionScanner/UEVersionScanner.h"
 #include "UENameResolver/NameResolver.h"
 #include "Utils/Utils.h"
+#include "Declarations.h"
 
 /* Linker directives */
 #pragma comment(lib, "comctl32.lib")
 #pragma comment(lib, "comdlg32.lib")
 #pragma comment(lib, "uxtheme.lib")
 #pragma comment(lib, "Psapi.lib")
-
-
-//===========================================================================
-// Definitions & Constants
-//===========================================================================
-
-/*=========== General Constants ===========*/
-#define IDT_UPDATE_TIMER           1
-#define UPDATE_INTERVAL_MS         500
-
-#ifndef BS_FLAT
-#define BS_FLAT                    0x8000
-#endif
-
-/*=========== Menu Commands ===========*/
-#define ID_MENU_ATTACH             300
-#define ID_MENU_PROCINFO           301
-#define ID_MENU_THREAD             302
-#define ID_MENU_SETTINGS           303
-#define ID_MENU_HOTKEYS            304
-#define ID_MENU_SUPPORT            305
-#define IDM_COPY_MODULE_ADDR       40001
-
-/*=========== Main Window Buttons ===========*/
-#define IDC_BTN_FIRSTSCAN          103
-#define IDC_BTN_NEXTSCAN           104
-#define IDC_BTN_UNDOSCAN           105
-#define IDC_BTN_NEWSCAN            106
-#define IDC_BTN_ADDADDRESS         210
-#define IDC_BTN_SAVETABLE          211
-#define IDC_BTN_LOADTABLE          212
-#define IDC_BTN_SAVECT             213
-#define IDC_BTN_EXIT               200
-
-/*=========== Scan Results & Saved Lists ===========*/
-#define IDC_LIST_SCANRESULTS       107
-#define IDC_LIST_SAVEDADDR         108
-#define DEFAULT_DESC_WIDTH         126
-#define DEFAULT_ADDR_WIDTH         100
-#define DEFAULT_DESC_WIDTH         126
-#define DEFAULT_ADDR_WIDTH         100
-
-/*=========== Scan Status & Progress ===========*/
-#define IDC_STATIC_SCANSTATUS      100
-#define IDC_PROGRESS_BAR           110
-
-/*=========== Value Input Controls ===========*/
-#define IDC_EDIT_VALUE             101
-#define IDC_COMBO_VALUETYPE        102
-#define IDC_COMBO_SEARCHMODE       109
-
-/*=========== Address Addition Dialog ===========*/
-#define IDC_ADD_EDITADDRESS        501
-#define IDC_ADD_COMBOTYPE          502
-#define IDC_ADD_OK                 503
-#define IDC_ADD_CANCEL             504
-
-/*=========== Process List & Filtering ===========*/
-#define IDC_PROCESS_LIST           200
-#define IDC_FILTER_TAB             300
-
-/*=========== Pointer‑Chain Frame ===========*/
-#define IDC_CHAIN_FRAME            600
-#define IDC_STATIC_BASE_ADDRESS    601
-#define IDC_EDIT_BASE_ADDRESS      602
-#define IDC_STATIC_DYNAMIC_ADDRESS 603
-#define IDC_EDIT_DYNAMIC_ADDRESS   604
-#define IDC_STATIC_MAXDEPTH        610
-#define IDC_EDIT_MAXDEPTH          611
-#define IDC_BTN_POINTERSCAN        612
-#define IDC_BTN_VIEWPTRS           613
-#define IDC_COMBO_PTRTABLE_TYPE    7002
-#define IDM_PTRTABLE_DELETE        7003
-
-/*=========== Pointer‑Chain Viewer ===========*/
-#define IDC_BTN_SAVE_PTRS          7001
-#define IDT_PTRTABLE_UPDATE        8001
-#define PTRTABLE_UPDATE_MS         500
-
-/*=========== Offsets Group ===========*/
-#define IDC_GROUP_POSOFFSETS         620
-#define IDC_LIST_OFFSETS             621
-#define IDC_EDIT_OFFSETNEW           622
-#define IDC_BTN_OFFSET_ADD           623
-#define IDC_BTN_OFFSET_DEL           624
-#define IDC_BTN_OFFSET_AUTO          625
-#define IDC_OFFSET_CLEAR             630
-#define IDC_CHECK_SCAN_SAVED_FILE    614
-
-/*=========== Log Controls ===========*/
-#define IDC_EDIT_LOG               700
-#define IDC_CLEAR_LOGS             701
-#define IDC_LOG_COPY               702
-#define IDC_LOG_SELECTALL          703
-#define IDC_LOG_PIN                704
 
 /*===========General Constants==========*/
 const size_t MAX_UNKNOWN_CANDIDATES = 400000000;
@@ -159,48 +67,19 @@ static double g_searchLow = 0.0;
 static double g_searchHigh = 0.0;
 
 /*===========Enums & Typedefs==========*/
-enum DataType {
-    DATA_BYTE,
-    DATA_2BYTE,
-    DATA_4BYTE,
-    DATA_8BYTE,
-    DATA_FLOAT,
-    DATA_DOUBLE
-};
 
-enum SearchMode {
-    SEARCH_EXACT,
-    SEARCH_BIGGER,
-    SEARCH_SMALLER,
-    SEARCH_BETWEEN,
-    SEARCH_UNKNOWN_INITIAL,
-    SEARCH_INCREASED,
-    SEARCH_DECREASED,
-    SEARCH_CHANGED,
-    SEARCH_UNCHANGED
+enum HotkeyID {
+    HK_FIRST_SCAN = 1,
+    HK_NEXT_SCAN = 2,
+    HK_UNDO_SCAN = 3,
+    HK_NEW_SCAN = 4,
+    HK_INCREASED = 5,
+    HK_DECREASED = 6,
+    HK_CHANGED = 7,
+    HK_UNCHANGED = 8,
 };
 
 /*===========Structs==========*/
-struct ScanEntry {
-    uintptr_t address;
-    union {
-        uint8_t  valByte;
-        uint16_t val2Byte;
-        uint32_t val4Byte;
-        uint64_t val8Byte;
-        float    valFloat;
-        double   valDouble;
-    } value;
-    DataType dataType;
-};
-
-struct SavedEntry {
-    bool freeze;
-    ScanEntry entry;
-    DataType savedType;
-    std::wstring desc;
-    std::wstring pointerExpr;
-};
 
 struct MemoryRegion {
     uintptr_t start;
@@ -238,94 +117,13 @@ HFONT hFont = CreateFontW(
 
 
 //===========================================================================
-// Forward Declarations
-//===========================================================================
-
-// — Core application entry & message loop
-LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam);
-DWORD   WINAPI MainThread(LPVOID lpParam);
-BOOL    APIENTRY DllMain(HMODULE hModule, DWORD ul_reason_for_call, LPVOID lpReserved);
-
-// — Dialog procedures
-LRESULT CALLBACK AddAddressDlgProc(HWND  hDlg, UINT message, WPARAM wParam, LPARAM lParam);
-LRESULT CALLBACK EditAddressDlgProc(HWND hDlg, UINT message, WPARAM wParam, LPARAM lParam);
-LRESULT CALLBACK ProcessDialogProc(HWND  hDlg, UINT message, WPARAM wParam, LPARAM lParam);
-
-// — In‐place edit controls
-LRESULT CALLBACK SubItemEditProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam);
-static LRESULT CALLBACK EditOffsetProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam);
-
-// — List / log controls
-static LRESULT CALLBACK OffsetsListProc(HWND  hwnd, UINT msg, WPARAM wParam, LPARAM lParam);
-LRESULT CALLBACK LogEditProc(HWND  hwnd, UINT msg, WPARAM wParam, LPARAM lParam);
-static LRESULT CALLBACK BaseAddrEditProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam);
-static uintptr_t GetRemoteModuleBaseAddressByName(DWORD pid, const std::wstring& moduleName);
-std::wstring DataTypeToString(DataType dt);
-void UpdateScanResultsListView();
-
-// — Window‐enumeration callbacks
-BOOL CALLBACK EnumApplicationsProcW(HWND hwnd, LPARAM lParam);
-BOOL CALLBACK EnumWindowsWindowsProcW(HWND    hwnd, LPARAM lParam);
-
-// — Core logic helpers
-class ScanResultPager;
-void LoadTableFromFile(const std::wstring& filename);
-void AppendSavedAddress(const SavedEntry& saved);
-bool FindPreviousEntry(uintptr_t address, ScanEntry& prevEntry);
-void SearchPositionalPointerPaths();
-DWORD WINAPI PointerScanThreadProc(LPVOID lpParam);
-LRESULT CALLBACK PointerTableProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam);
-
-// — Unreal Engine
-void ShowAutoOffsetsDialog(HWND hParent, uintptr_t worldPtr);
-static std::vector<std::pair<uintptr_t, uintptr_t>> g_autoOffsets;
-
-// - WinProc Definitions
-static LRESULT Handle_CopyData(HWND hWnd, LPARAM lParam);
-static LRESULT Handle_CtlColorStatic(WPARAM wParam, LPARAM lParam);
-static LRESULT Handle_Create(HWND hWnd, LPARAM lParam);
-static LRESULT Handle_Timer(HWND hWnd);
-static LRESULT Handle_Notify(HWND hWnd, WPARAM wParam, LPARAM lParam);
-static LRESULT Handle_Command(HWND hWnd, WPARAM wParam, LPARAM lParam);
-static LRESULT Handle_Destroy(HWND hWnd);
-
-// (In‑place edit)
-void SubclassEditControl(HWND hEdit);
-
-// ScanResultPager is a class:
-class ScanResultPager;
-
-// Prototypes for “Show…” and “Select…” and “Inject/Attach…” helpers, 
-
-void ShowEditAddressDialog(HWND hParent, int index);
-void ShowAddAddressDialog(HWND hParent);
-
-void SelectProcessDialog(HWND hParent);
-void AttachToProcess(DWORD pid);
-void InjectSelfIntoProcess(DWORD pid);
-
-// (Saved‑entry re‑resolution)
-void ResolvePendingSavedEntries();
-
-// (UI Helpers)
-void UpdateScanButtons(bool enabled);
-void UpdateScanResultsListView();
-void UpdateScanStatus();
-
-// (Scan core)
-bool PerformFirstScan(double searchVal, DataType dt, SearchMode searchMode);
-bool PerformNextScan(double searchVal, DataType dt, SearchMode searchMode);
-bool UndoScan();
-void ResetScans();
-bool GetSearchValueFromEdit(double& value);
-
-//===========================================================================
 // Global Variables
 //===========================================================================
 
 // — Folders & Scan IDs
 std::wstring           g_scanResultsFolder;
 std::wstring           g_tablesFolder;
+static std::wstring    g_settingsFolder;
 int                    g_currentScanId = 0;
 std::atomic<size_t>    g_candidateCount = 0;
 
@@ -335,6 +133,7 @@ HWND                   g_hStaticScanStatus = nullptr;
 HWND                   g_hProgressBar = nullptr;
 HWND                   g_hEditValue = nullptr;
 HWND                   g_hComboValueType = nullptr;
+HWND                   g_hComboSearchMode = nullptr;
 HWND                   g_hBtnFirstScan = nullptr;
 HWND                   g_hBtnNextScan = nullptr;
 HWND                   g_hBtnUndoScan = nullptr;
@@ -413,6 +212,10 @@ static WNDPROC         g_oldBaseAddrProc = NULL;
 // — Numerical tolerances
 const double           epsilon_double = 0.001;
 const float            epsilon_float = 0.001f;
+
+// - Setting Menu
+static bool  g_pauseDuringScan = false;
+static std::map<int, int> g_hotkeyMap;
 
 
 //===========================================================================
@@ -1744,15 +1547,15 @@ static LRESULT Handle_Create(HWND hWnd, LPARAM lParam)
         SendMessageW(g_hComboValueType, CB_ADDSTRING, 0, (LPARAM)s);
     SendMessageW(g_hComboValueType, CB_SETCURSEL, 2, 0);
 
-    HWND hComboSearch = CreateWindowExW(
+    g_hComboSearchMode = CreateWindowExW(
         WS_EX_CLIENTEDGE, L"COMBOBOX", L"",
         WS_CHILD | WS_VISIBLE | CBS_DROPDOWNLIST,
         btnX + comboW + gap, comboY, comboW, comboH, hWnd, (HMENU)IDC_COMBO_SEARCHMODE, hInst, NULL
     );
     for (auto* s : { L"Exact Value",L"Bigger Than",L"Smaller Than",
                      L"Value Between", L"Unknown Initial Value" })
-        SendMessageW(hComboSearch, CB_ADDSTRING, 0, (LPARAM)s);
-    SendMessageW(hComboSearch, CB_SETCURSEL, 0, 0);
+        SendMessageW(g_hComboSearchMode, CB_ADDSTRING, 0, (LPARAM)s);
+    SendMessageW(g_hComboSearchMode, CB_SETCURSEL, 0, 0);
 
     int frameY = comboY + comboH - 65;
     HWND g_hChainFrame = CreateWindowExW(
@@ -1860,7 +1663,6 @@ static LRESULT Handle_Create(HWND hWnd, LPARAM lParam)
         editX, frameY + 15 + 60, 40, 24,
         hWnd, (HMENU)IDC_EDIT_MAXDEPTH, hInst, NULL);
 
-    // Checkbox: Scan From Saved File
     HWND hChkSaved = CreateWindowW(
         L"BUTTON", L"Scan From File",
         WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX,
@@ -1996,7 +1798,7 @@ static LRESULT Handle_Create(HWND hWnd, LPARAM lParam)
 
 
     HWND ctrls[] = {
-        (HWND)g_hEditValue, g_hComboValueType, hComboSearch,
+        (HWND)g_hEditValue, g_hComboValueType, g_hComboSearchMode,
         g_hBtnFirstScan, g_hBtnNextScan, g_hBtnUndoScan, g_hBtnNewScan,
         hBtnAddAddress, hBtnSaveTable, hBtnLoadTable, hBtnSaveCT,
         hBtnExit, g_hOutputLog, g_hEditBaseAddress, g_hDynamicAddressEdit,
@@ -2506,6 +2308,10 @@ static LRESULT Handle_Command(HWND hWnd, WPARAM wParam, LPARAM lParam)
                 L"Error", MB_OK | MB_ICONERROR);
             break;
         }
+
+        if (g_pauseDuringScan)
+            PauseTargetProcess();
+
         PerformFirstScan(singleVal, dt, searchMode);
 
         // Disable First Scan and remove Unknown Initial from the dropdown
@@ -2534,11 +2340,16 @@ static LRESULT Handle_Command(HWND hWnd, WPARAM wParam, LPARAM lParam)
                 SendMessageW(hComboSearch, CB_INSERTSTRING, (WPARAM)(vbIdx + 1 + i), (LPARAM)nextModes[i]);
             }
         }
+        if (g_pauseDuringScan)
+            ResumeTargetProcess();
     }
     break;
 
     case IDC_BTN_NEXTSCAN:
     {
+        if (g_pauseDuringScan)
+            PauseTargetProcess();
+
         wchar_t buffer[256] = {};
         GetWindowText(g_hEditValue, buffer, 256);
 
@@ -2677,6 +2488,9 @@ static LRESULT Handle_Command(HWND hWnd, WPARAM wParam, LPARAM lParam)
         }
 
         PerformNextScan(singleVal, dt, searchMode);
+
+        if (g_pauseDuringScan)
+            ResumeTargetProcess();
     }
     break;
 
@@ -2740,6 +2554,8 @@ static LRESULT Handle_Command(HWND hWnd, WPARAM wParam, LPARAM lParam)
         EnableWindow(g_hBtnFirstScan, TRUE);
         EnableWindow(g_hComboValueType, TRUE);
         SendMessageW(g_hComboValueType, CB_SETCURSEL, 2, 0);
+        EnableWindow(g_hEditValue, TRUE);
+        SetWindowTextW(g_hEditValue, L"");
         {
             HWND hComboSearch = GetDlgItem(g_hWndMain, IDC_COMBO_SEARCHMODE);
             SendMessageW(hComboSearch, CB_SETCURSEL, 0, 0);
@@ -3251,7 +3067,6 @@ static LRESULT Handle_Command(HWND hWnd, WPARAM wParam, LPARAM lParam)
             if (!line.empty())
                 g_loadedChains.push_back(splitPointerExpr(line));
 
-        // Show the pointer‑table dialog
         ShowPointerTableDialog(g_hWndMain);
     }
     break;
@@ -3361,7 +3176,6 @@ static LRESULT Handle_Command(HWND hWnd, WPARAM wParam, LPARAM lParam)
                             (unsigned long long)mi.lpBaseOfDll);
                         // Log(buf);
 
-                         // also update the base‑address edit
                         wchar_t editBuf[32];
                         swprintf(editBuf, 32,
                             L"%llX",
@@ -3377,13 +3191,20 @@ static LRESULT Handle_Command(HWND hWnd, WPARAM wParam, LPARAM lParam)
         SetWindowTextW(g_hEditBaseAddress, origBaseText);
         g_resolvedBaseAddress = origResolved;
 
-        // make sure the log actually redraws immediately
         RedrawWindow(g_hOutputLog, nullptr, nullptr, RDW_INVALIDATE | RDW_UPDATENOW);
     }
     break;
     case ID_MENU_SETTINGS:
     {
         HMENU hPopup = CreatePopupMenu();
+        AppendMenuW(
+            hPopup,
+            MF_STRING | (g_pauseDuringScan ? MF_CHECKED : MF_UNCHECKED),
+            ID_MENU_PAUSE_SCAN,
+            L"Pause Game While Scanning"
+        );
+        AppendMenuW(hPopup, MF_SEPARATOR, 0, NULL);
+
         AppendMenuW(hPopup, MF_STRING, ID_MENU_HOTKEYS, L"Hotkeys");
         AppendMenuW(hPopup, MF_STRING, ID_MENU_SUPPORT, L"Support");
 
@@ -3397,14 +3218,16 @@ static LRESULT Handle_Command(HWND hWnd, WPARAM wParam, LPARAM lParam)
     }
     break;
 
+    case ID_MENU_PAUSE_SCAN:
+        g_pauseDuringScan = !g_pauseDuringScan;
+        break;
+
     case ID_MENU_HOTKEYS:
-        // TODO: open your Hotkeys dialog
-        MessageBoxW(hWnd, L"Hotkeys settings coming soon…", L"Settings – Hotkeys", MB_OK);
+        ShowHotkeysDialog(hWnd);
         break;
 
     case ID_MENU_SUPPORT:
     {
-        // Configure the Task Dialog
         TASKDIALOGCONFIG tdc = {};
         tdc.cbSize = sizeof(tdc);
         tdc.hwndParent = hWnd;
@@ -3412,10 +3235,9 @@ static LRESULT Handle_Command(HWND hWnd, WPARAM wParam, LPARAM lParam)
         tdc.pszWindowTitle = L"Settings – Support";
         tdc.pszMainInstruction = L"Need Support?";
         tdc.pszContent =
-            L"Visit <a href=\"https://memre.io\">memre.io</a> or join MemRE "
+            L"Visit <a href=\"https://memre.io\">MemRE.io</a> or join MemRE "
             L"<a href=\"https://discord.gg/7nGkqwdJhn\">Discord</a>.";
 
-        // Callback to catch hyperlink clicks
         tdc.pfCallback = [](HWND, UINT notification, WPARAM wp, LPARAM lp, LONG_PTR) -> HRESULT {
             if (notification == TDN_HYPERLINK_CLICKED) {
                 LPCWSTR uri = reinterpret_cast<LPCWSTR>(lp);
@@ -3440,6 +3262,92 @@ static LRESULT Handle_Destroy(HWND hWnd)
     return 0;
 }
 
+// - Hotkey Helper
+static void SaveHotkeys()
+{
+    std::wstring cfg = g_settingsFolder + L"\\hotkeys.cfg";
+    std::wofstream out(cfg);
+    if (!out) return;
+
+    for (auto& [id, scan] : g_hotkeyMap)
+    {
+        if (scan == 0) continue;
+        BYTE vk = LOBYTE(scan);
+        BYTE shifts = HIBYTE(scan);
+
+        wchar_t c = (shifts & 1)
+            ? vk : std::towlower(vk);
+
+        out << id << L"=" << c << L"\n";
+    }
+}
+
+static void LoadHotkeys()
+{
+    std::wstring cfg = g_settingsFolder + L"\\hotkeys.cfg";
+    std::wifstream in(cfg);
+    if (!in) return;
+
+    g_hotkeyMap.clear();
+
+    std::wstring line;
+    while (std::getline(in, line))
+    {
+        if (line.empty() || line[0] == L'#')
+            continue;
+        auto eq = line.find(L'=');
+        if (eq == std::wstring::npos || eq + 1 >= line.size())
+            continue;
+
+        int id = std::stoi(line.substr(0, eq));
+        wchar_t c = line[eq + 1];
+
+        SHORT scan = VkKeyScanW(c);
+        g_hotkeyMap[id] = scan;
+    }
+}
+
+// - Pause Process
+static void PauseTargetProcess()
+{
+    THREADENTRY32 te{ sizeof(te) };
+    HANDLE hSnap = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0);
+    if (hSnap == INVALID_HANDLE_VALUE) return;
+
+    while (Thread32Next(hSnap, &te))
+    {
+        if (te.th32OwnerProcessID == g_targetProcessId)
+        {
+            HANDLE hThread = OpenThread(THREAD_SUSPEND_RESUME, FALSE, te.th32ThreadID);
+            if (hThread) {
+                SuspendThread(hThread);
+                CloseHandle(hThread);
+            }
+        }
+    }
+    CloseHandle(hSnap);
+}
+
+static void ResumeTargetProcess()
+{
+    THREADENTRY32 te{ sizeof(te) };
+    HANDLE hSnap = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0);
+    if (hSnap == INVALID_HANDLE_VALUE) return;
+
+    while (Thread32Next(hSnap, &te))
+    {
+        if (te.th32OwnerProcessID == g_targetProcessId)
+        {
+            HANDLE hThread = OpenThread(THREAD_SUSPEND_RESUME, FALSE, te.th32ThreadID);
+            if (hThread) {
+                ResumeThread(hThread);
+                CloseHandle(hThread);
+            }
+        }
+    }
+    CloseHandle(hSnap);
+}
+
 // — Other Helpers
 bool IsReadable(DWORD protect)
 {
@@ -3460,7 +3368,7 @@ bool GetSearchValueFromEdit(double& value)
 
 
 // ————————————————————————————————————————————————————————————————
-// Dialog Procedures: Add / Edit Address
+// Dialog Procedures: Add / Edit Address, Hotkeys
 // ————————————————————————————————————————————————————————————————
 LRESULT CALLBACK AddAddressDlgProc(HWND hDlg, UINT message, WPARAM wParam, LPARAM lParam)
 {
@@ -3869,6 +3777,145 @@ void ShowEditAddressDialog(HWND hParent, int index)
     SetWindowPos(hDlg, NULL, x, y, 0, 0, SWP_NOSIZE | SWP_NOZORDER);
     ShowWindow(hDlg, SW_SHOW);
     UpdateWindow(hDlg);
+}
+
+LRESULT CALLBACK HotkeysDlgProc(HWND hDlg, UINT msg, WPARAM wParam, LPARAM lParam)
+{
+    static HWND edits[8] = { };
+    switch (msg)
+    {
+
+    case WM_CTLCOLORSTATIC:
+    {
+        HDC hdc = (HDC)wParam;
+        SetBkMode(hdc, TRANSPARENT);
+        return (LRESULT)GetSysColorBrush(COLOR_WINDOW);
+    }
+
+    case WM_CREATE:
+    {
+        const wchar_t* labels[8] = {
+            L"First Scan:", L"Next Scan:", L"Undo Scan:", L"New Scan:",
+            L"Increased Value:", L"Decreased Value:",
+            L"Changed Value:",   L"Unchanged Value:"
+        };
+
+        for (int i = 0; i < 8; ++i)
+        {
+            CreateWindowW(L"STATIC", labels[i],
+                WS_CHILD | WS_VISIBLE | SS_CENTERIMAGE | SS_LEFT,
+                10, 10 + i * 30, 140, 20, hDlg, NULL, NULL, NULL);
+
+            edits[i] = CreateWindowExW(
+                WS_EX_CLIENTEDGE, L"EDIT", L"",
+                WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL | ES_CENTER,
+                160, 10 + i * 30, 27, 27, hDlg,
+                (HMENU)(1000 + i), NULL, NULL);
+
+            SHORT scan = 0;
+            auto it = g_hotkeyMap.find(i + 1);
+            if (it != g_hotkeyMap.end())
+				scan = it->second;
+            BYTE  vk = LOBYTE(scan);
+            BYTE  shifts = HIBYTE(scan);
+            wchar_t display = (shifts & 1)
+                ? (wchar_t)vk
+                : std::towlower((wchar_t)vk);
+
+            if (display != 0) {
+                wchar_t buf[2] = { display, 0 };
+                SetWindowTextW(edits[i], buf);
+            }
+        }
+
+        CreateWindowW(L"BUTTON", L"OK",
+            WS_CHILD | WS_VISIBLE | BS_DEFPUSHBUTTON,
+            10, 270, 80, 30, hDlg,
+            (HMENU)2001, NULL, NULL);
+
+        CreateWindowW(L"BUTTON", L"Cancel",
+            WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
+            110, 270, 80, 30, hDlg,
+            (HMENU)2002, NULL, NULL);
+        return 0;
+    }
+
+    case WM_COMMAND:
+        if (LOWORD(wParam) == 2001)
+        {
+            for (auto& [id, _] : g_hotkeyMap)
+                UnregisterHotKey(g_hWndMain, id);
+
+            for (int i = 0; i < 8; ++i)
+            {
+                HWND hEdit = edits[i];
+				if (!hEdit) continue;
+                wchar_t buf[2] = {};
+                GetWindowTextW(hEdit, buf, _countof(buf));
+                SHORT scan = buf[0] ? VkKeyScanW(buf[0]) : 0;
+                BYTE vkCode = LOBYTE(scan);
+                BYTE shifts = HIBYTE(scan);
+
+                UINT mods = 0;
+                if (shifts & 1) mods |= MOD_SHIFT;
+                if (shifts & 2) mods |= MOD_CONTROL;
+                if (shifts & 4) mods |= MOD_ALT;
+
+                g_hotkeyMap[i + 1] = scan;
+                if (vkCode)
+                    RegisterHotKey(g_hWndMain, i + 1, mods, vkCode);
+            }
+
+            SaveHotkeys();
+            DestroyWindow(hDlg);
+        }
+        else if (LOWORD(wParam) == 2002)
+        {
+            DestroyWindow(hDlg);
+        }
+        return 0;
+
+    case WM_CLOSE:
+        DestroyWindow(hDlg);
+        return 0;
+    }
+    return DefWindowProcW(hDlg, msg, wParam, lParam);
+}
+
+static void ShowHotkeysDialog(HWND parent)
+{
+    static bool reg = false;
+    if (!reg)
+    {
+        WNDCLASSW wc{};
+        wc.lpfnWndProc = HotkeysDlgProc;
+        wc.hInstance = GetModuleHandleW(NULL);
+        wc.lpszClassName = L"HotkeysDlgClass";
+        wc.hbrBackground = (HBRUSH)(COLOR_WINDOW + 1);
+        RegisterClassW(&wc);
+        reg = true;
+    }
+
+    HWND dlg = CreateWindowExW(
+        WS_EX_DLGMODALFRAME,
+        L"HotkeysDlgClass",
+        L"Hotkeys Settings",
+        WS_POPUP | WS_CAPTION | WS_SYSMENU,
+        0, 0, 225, 360,
+        parent, NULL, GetModuleHandleW(NULL), NULL
+    );
+
+    RECT pr, dr;
+    GetWindowRect(parent, &pr);
+    GetWindowRect(dlg, &dr);
+    int dlgW = dr.right - dr.left;
+    int dlgH = dr.bottom - dr.top;
+    int x = pr.left + ((pr.right - pr.left) - dlgW) / 2;
+    int y = pr.top + ((pr.bottom - pr.top) - dlgH) / 2;
+    SetWindowPos(dlg, NULL, x, y, 0, 0, SWP_NOSIZE | SWP_NOZORDER);
+
+    ShowWindow(dlg, SW_SHOW);
+    UpdateWindow(dlg);
 }
 
 
@@ -5914,6 +5961,114 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
     case WM_CREATE:
         return Handle_Create(hWnd, lParam);
 
+    case WM_HOTKEY:
+        switch (wParam) {
+        case HK_FIRST_SCAN:
+            if (IsWindowEnabled(g_hBtnFirstScan))
+                SendMessageW(g_hBtnFirstScan, BM_CLICK, 0, 0);
+            break;
+
+        case HK_NEXT_SCAN:
+            if (IsWindowEnabled(g_hBtnNextScan))
+                SendMessageW(g_hBtnNextScan, BM_CLICK, 0, 0);
+            break;
+
+        case HK_UNDO_SCAN:
+            if (IsWindowEnabled(g_hBtnUndoScan))
+                SendMessageW(g_hBtnUndoScan, BM_CLICK, 0, 0);
+            break;
+
+        case HK_NEW_SCAN:
+            if (IsWindowEnabled(g_hBtnNewScan))
+                SendMessageW(g_hBtnNewScan, BM_CLICK, 0, 0);
+            break;
+
+        case HK_INCREASED:
+            if (IsWindowEnabled(g_hBtnNextScan)) {
+                int idx = (int)SendMessageW(
+                    g_hComboSearchMode,
+                    CB_FINDSTRINGEXACT,
+                    (WPARAM)-1,
+                    (LPARAM)L"Increased Value"
+                );
+                if (idx != CB_ERR) {
+                    SendMessageW(g_hComboSearchMode, CB_SETCURSEL, idx, 0);
+                    SendMessageW(
+                        g_hWndMain,
+                        WM_COMMAND,
+                        MAKEWPARAM(IDC_COMBO_SEARCHMODE, CBN_SELCHANGE),
+                        (LPARAM)g_hComboSearchMode
+                    );
+                    SendMessageW(g_hBtnNextScan, BM_CLICK, 0, 0);
+                }
+            }
+            break;
+
+        case HK_DECREASED:
+            if (IsWindowEnabled(g_hBtnNextScan)) {
+                int idx = (int)SendMessageW(
+                    g_hComboSearchMode,
+                    CB_FINDSTRINGEXACT,
+                    (WPARAM)-1,
+                    (LPARAM)L"Decreased Value"
+                );
+                if (idx != CB_ERR) {
+                    SendMessageW(g_hComboSearchMode, CB_SETCURSEL, idx, 0);
+                    SendMessageW(
+                        g_hWndMain,
+                        WM_COMMAND,
+                        MAKEWPARAM(IDC_COMBO_SEARCHMODE, CBN_SELCHANGE),
+                        (LPARAM)g_hComboSearchMode
+                    );
+                    SendMessageW(g_hBtnNextScan, BM_CLICK, 0, 0);
+                }
+            }
+            break;
+
+        case HK_CHANGED:
+            if (IsWindowEnabled(g_hBtnNextScan)) {
+                int idx = (int)SendMessageW(
+                    g_hComboSearchMode,
+                    CB_FINDSTRINGEXACT,
+                    (WPARAM)-1,
+                    (LPARAM)L"Changed Value"
+                );
+                if (idx != CB_ERR) {
+                    SendMessageW(g_hComboSearchMode, CB_SETCURSEL, idx, 0);
+                    SendMessageW(
+                        g_hWndMain,
+                        WM_COMMAND,
+                        MAKEWPARAM(IDC_COMBO_SEARCHMODE, CBN_SELCHANGE),
+                        (LPARAM)g_hComboSearchMode
+                    );
+                    SendMessageW(g_hBtnNextScan, BM_CLICK, 0, 0);
+                }
+            }
+            break;
+
+        case HK_UNCHANGED:
+            if (IsWindowEnabled(g_hBtnNextScan)) {
+                int idx = (int)SendMessageW(
+                    g_hComboSearchMode,
+                    CB_FINDSTRINGEXACT,
+                    (WPARAM)-1,
+                    (LPARAM)L"Unchanged Value"
+                );
+                if (idx != CB_ERR) {
+                    SendMessageW(g_hComboSearchMode, CB_SETCURSEL, idx, 0);
+                    SendMessageW(
+                        g_hWndMain,
+                        WM_COMMAND,
+                        MAKEWPARAM(IDC_COMBO_SEARCHMODE, CBN_SELCHANGE),
+                        (LPARAM)g_hComboSearchMode
+                    );
+                    SendMessageW(g_hBtnNextScan, BM_CLICK, 0, 0);
+                }
+            }
+            break;
+        }
+        break;
+
     case WM_TIMER:
         return Handle_Timer(hWnd);
 
@@ -5968,6 +6123,10 @@ DWORD WINAPI MainThread(LPVOID lpParam)
     g_tablesFolder = baseFolder + L"\\Tables";
     CreateDirectoryW(g_tablesFolder.c_str(), NULL);
 
+    g_settingsFolder = baseFolder + L"\\Settings";
+    CreateDirectoryW(g_settingsFolder.c_str(), nullptr);
+    LoadHotkeys();
+
     CleanupDatFiles(g_scanResultsFolder);
 
     INITCOMMONCONTROLSEX icex = { sizeof(icex), ICC_WIN95_CLASSES | ICC_STANDARD_CLASSES };
@@ -5984,6 +6143,17 @@ DWORD WINAPI MainThread(LPVOID lpParam)
         hInstance,
         nullptr
     );
+
+    LoadHotkeys();
+    for (auto& [id, scan] : g_hotkeyMap) {
+        if (scan == 0) continue;
+        BYTE vkCode = LOBYTE(scan);
+        BYTE shiftSt = HIBYTE(scan);
+        UINT mods = (shiftSt & 1 ? MOD_SHIFT : 0)
+            | (shiftSt & 2 ? MOD_CONTROL : 0)
+            | (shiftSt & 4 ? MOD_ALT : 0);
+        RegisterHotKey(g_hWndMain, id, mods, vkCode);
+    }
 
     SetWindowPos(g_hWndMain, NULL, 670, 340, 0, 0, SWP_NOSIZE | SWP_NOZORDER);
 
