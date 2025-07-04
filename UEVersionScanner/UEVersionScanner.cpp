@@ -1,194 +1,282 @@
-﻿#include "UEVersionScanner.h"
-#include "../GOffsets/GOffsets.h"
+#include "GOffsets.h"
 
 #include <iostream>
 #include <fstream>
 #include <sstream>
+#include <cstring>
 #include <vector>
-#include <algorithm>
-#include <cctype>
 #include <windows.h>
-#include <TlHelp32.h>
 #include <Psapi.h>
 
-#pragma comment(lib, "Version.lib")
-
-// Helper: Reads an entire file into a string.
-static std::string ReadEntireFile(const std::string& filePath) {
-    std::ifstream file(filePath, std::ios::binary);
-    if (!file) return "";
-    std::stringstream buffer;
-    buffer << file.rdbuf();
-    return buffer.str();
-}
-
-// Helper: Checks if a file exists.
-static bool FileExists(const std::string& filePath) {
-    DWORD attrib = GetFileAttributesA(filePath.c_str());
-    return (attrib != INVALID_FILE_ATTRIBUTES && !(attrib & FILE_ATTRIBUTE_DIRECTORY));
-}
-
-std::string GetVersionFromResource(const std::string& filePath) {
-    char modulePath[MAX_PATH] = { 0 };
-    strcpy_s(modulePath, filePath.c_str());
-    DWORD dummy;
-    DWORD size = GetFileVersionInfoSizeA(modulePath, &dummy);
-    if (size == 0)
-        return "";
-    std::vector<char> data(size);
-    if (!GetFileVersionInfoA(modulePath, 0, size, data.data()))
-        return "";
-    VS_FIXEDFILEINFO* fileInfo = nullptr;
-    UINT len = 0;
-    if (VerQueryValueA(data.data(), "\\", (LPVOID*)&fileInfo, &len) && fileInfo) {
-        int major = HIWORD(fileInfo->dwFileVersionMS);
-        int minor = LOWORD(fileInfo->dwFileVersionMS);
-        int build = HIWORD(fileInfo->dwFileVersionLS);
-        int revision = LOWORD(fileInfo->dwFileVersionLS);
-        char versionStr[128];
-        sprintf_s(versionStr, "%d.%d.%d.%d", major, minor, build, revision);
-        return versionStr;
+// Reads the binary file.
+std::vector<Byte> readBinaryFile(const std::string& filename) {
+    std::ifstream file(filename, std::ios::binary);
+    if (!file) {
+        std::cerr << "Error: Could not open file " << filename << std::endl;
+        return {};
     }
-    return "";
+    file.seekg(0, std::ios::end);
+    size_t fileSize = file.tellg();
+    std::vector<Byte> buffer(fileSize);
+    file.seekg(0, std::ios::beg);
+    file.read(reinterpret_cast<char*>(buffer.data()), fileSize);
+    return buffer;
 }
 
-std::string GetVersionFromFiles(const std::string& filePath) {
-    char modulePath[MAX_PATH] = { 0 };
-    strcpy_s(modulePath, filePath.c_str());
-    std::string exePath(modulePath);
-    size_t lastSlash = exePath.find_last_of("\\/");
-    std::string exeDir;
-    if (lastSlash != std::string::npos)
-        exeDir = exePath.substr(0, lastSlash);
-    std::vector<std::string> candidates;
-    candidates.push_back(exeDir + "\\Engine\\Build\\Build.version");
-    candidates.push_back(exeDir + "\\UE4Version.txt");
-    candidates.push_back(exeDir + "\\UE5Version.txt");
-    size_t parentSlash = exeDir.find_last_of("\\/");
-    if (parentSlash != std::string::npos) {
-        std::string parentDir = exeDir.substr(0, parentSlash);
-        candidates.push_back(parentDir + "\\Engine\\Build\\Build.version");
-        candidates.push_back(parentDir + "\\UE4Version.txt");
-        candidates.push_back(parentDir + "\\UE5Version.txt");
-    }
-    for (auto& path : candidates) {
-        if (FileExists(path)) {
-            std::string content = ReadEntireFile(path);
-            if (!content.empty()) {
-                content.erase(std::remove(content.begin(), content.end(), '\r'), content.end());
-                content.erase(std::remove(content.begin(), content.end(), '\n'), content.end());
-                return content;
+// Signatures
+std::vector<Signature> getSignatures() {
+    std::vector<Signature> sigs;
+    // ----------------------------------------------
+    // START GWORLDS
+    // ----------------------------------------------
+    sigs.push_back({ "GWorld (Variant 1)",
+        {0x48, 0x89, 0x05, 0x00, 0x00, 0x00,
+         0x00, 0x00, 0x8B, 0x00, 0x00, 0x00,
+         0xF6, 0x86, 0x3B, 0x01, 0x00, 0x00,
+         0x40},
+        "xxx?????x???xxxxxxx"
+        });
+
+    sigs.push_back({ "GWorld (Variant 2)",
+        {0x48, 0x89, 0x05, 0x00, 0x00, 0x00,
+         0x00, 0x00, 0x8B, 0x00, 0x00, 0xF6,
+         0x86, 0x3B, 0x01, 0x00, 0x00, 0x40},
+        "xxx?????x??xxxxxxx"
+        });
+
+    sigs.push_back({ "GWorld (Variant 3)",
+        {0x48, 0x89, 0x05, 0x00, 0x00, 0x00,
+         0x00, 0x00, 0x8B, 0x00, 0x00, 0x00,
+         0x00, 0x00, 0xF6, 0x86, 0x00, 0x01,
+         0x00, 0x00, 0x40},
+        "xxx?????x?????xx?xxxx"
+        });
+
+    sigs.push_back({ "GWorld (Variant 4)",
+        {0x00, 0x8B, 0x00, 0x00, 0x00, 0x00,
+         0x00, 0x00, 0x48, 0x89, 0x05, 0x00,
+         0x00, 0x00, 0x00, 0x00, 0x8B, 0x00,
+         0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+         0x00, 0x00, 0x00, 0x00, 0x00},
+        "?x???xx?xxx?????x???xx?????x?"
+        });
+
+    sigs.push_back({ "GWorld (Variant 5)",
+        {0x48, 0x89, 0x05, 0x00, 0x00, 0x00,
+         0x02, 0x48, 0x8B, 0x8F, 0xA0, 0x00,
+         0x00, 0x00},
+        "xxx???xxxxx???"
+        }); // IDK about this AOB.
+
+    sigs.push_back({ "GWorld (Variant 6)",
+        {0x48, 0x89, 0x05, 0x00, 0x00, 0x00,
+         0x00, 0x49, 0x8B, 0x00, 0x78, 0xF6,
+         0x00, 0x3B, 0x01, 0x00, 0x00, 0x40},
+        "xxx????xx?xx?xx??x"
+        });
+
+    sigs.push_back({ "GWorld (Variant 7)",
+        {0xE8, 0x00, 0x00, 0x00, 0xFF, 0x00,
+         0x8B, 0x00, 0x78, 0x48, 0x89, 0x05,
+         0x00, 0x00, 0x00, 0x00, 0x00, 0x8B,
+         0x00, 0x78},
+        "x???x?x?xxxx?????x?x"
+        });
+
+    sigs.push_back({ "GWorld (Variant 8)",
+        {0x48, 0x89, 0x05, 0x00, 0x00, 0x00,
+         0x00, 0x00, 0x8B, 0x00, 0x88, 0x00,
+         0x00, 0x00, 0xF6, 0x00, 0x0B, 0x01,
+         0x00, 0x00, 0x40, 0x75, 0x00},
+        "xxx?????x?x???x?xx??xx?"
+        });
+    // ----------------------------------------------
+    // END GWORLDS
+    // ----------------------------------------------
+
+    // ----------------------------------------------
+    // START GNAMES
+    // ----------------------------------------------
+    sigs.push_back({ "GNames (Variant 1)",
+        {0x48, 0x8D, 0x0D, 0x00, 0x00, 0x00,
+         0x00, 0xE8, 0x00, 0x00, 0xFE, 0xFF,
+         0x4C, 0x8B, 0xC0, 0xC6, 0x05, 0x00,
+         0x00, 0x00, 0x00, 0x01},
+        "xxx????x??xxxxxxx????x"
+        });
+
+    sigs.push_back({ "GNames (Variant 2)",
+        {0x48, 0x8D, 0x0D, 0x00, 0x00, 0x00,
+         0x03, 0xE8, 0x00, 0x00, 0xFF, 0xFF,
+         0x4C, 0x00, 0xC0},
+        "xxx???xx??xxx?x"
+        });
+
+    sigs.push_back({ "GNames (Variant 3)",
+        {0x48, 0x8D, 0x0D, 0x00, 0x00, 0x00,
+         0x00, 0xE8, 0x00, 0x00, 0xFF, 0xFF,
+         0x48, 0x8B, 0xD0, 0xC6, 0x05, 0x00,
+         0x00, 0x00, 0x00, 0x01},
+        "xxx????x??xxxxxxx????x"
+        });
+
+    sigs.push_back({ "GNames (Variant 4)",
+        {0x48, 0x8B, 0X05, 0X00, 0x00, 0x00,
+         0x02, 0x48, 0x85, 0xC0, 0x75, 0x5F,
+         0xB9, 0x08, 0x08, 0x00},
+        "xxx???xxxxxxxxx?"
+        });
+    // ----------------------------------------------
+    // END GNAMES
+    // ----------------------------------------------
+
+    // ----------------------------------------------
+    // START GOBJECTS
+    // ----------------------------------------------
+    sigs.push_back({ "GObjects (Variant 1)",
+        {0x4C, 0x8B, 0x0D, 0x00, 0x00, 0x00,
+         0x00, 0x99, 0x0F, 0xB7, 0xD2},
+        "xxx????xxxx"
+        });
+
+    sigs.push_back({ "GObjects (Variant 2)",
+        {0x4C, 0x8B, 0x0D, 0x00, 0x00, 0x00,
+         0x00, 0x41, 0x3B, 0xC0, 0x7D, 0x17},
+        "xxx????xxxxx"
+        });
+
+    sigs.push_back({ "GObjects (Variant 3)",
+        {0x4C, 0x8B, 0x0D, 0x00, 0x00, 0x00,
+         0x04, 0x90, 0x0F, 0xB7, 0xC6, 0x8B,
+         0xD6},
+        "xxx???xxxxxxx"
+        });
+
+    sigs.push_back({ "GObjects (Variant 4)",
+        {0x4C, 0x8B, 0x0D, 0x00, 0x00, 0x00,
+         0x04, 0x90, 0x0F, 0xB7, 0xC6, 0x8B,
+         0xD6},
+        "xxx???xxxxxxx"
+        });
+
+    sigs.push_back({ "GObjects (Variant 5)",
+        {0x4C, 0x8B, 0x0D, 0x00, 0x00, 0x00,
+         0x00, 0x8B, 0xD0, 0xC1, 0xEA, 0x10},
+        "xxx????xxxxx"
+        });
+    // ----------------------------------------------
+    // END GOBJECTS
+    // ----------------------------------------------
+
+    return sigs;
+}
+
+// Searches for a pattern.
+size_t findPatternMask(const std::vector<Byte>& data,
+    const std::vector<Byte>& pattern,
+    const std::string& mask) {
+    if (pattern.size() != mask.size() || pattern.empty() || data.empty())
+        return std::string::npos;
+    for (size_t i = 0; i <= data.size() - pattern.size(); ++i) {
+        bool found = true;
+        for (size_t j = 0; j < pattern.size(); ++j) {
+            if (mask[j] == 'x' && data[i + j] != pattern[j]) {
+                found = false;
+                break;
             }
         }
+        if (found)
+            return i;
     }
-    return "";
+    return std::string::npos;
 }
 
-std::string GetVersionFromMemoryScan() {
-    HMODULE hModule = GetModuleHandleA(NULL);
-    if (!hModule)
-        return "";
-    MODULEINFO modInfo = { 0 };
-    if (!GetModuleInformation(GetCurrentProcess(), hModule, &modInfo, sizeof(modInfo)))
-        return "";
-    char* baseAddr = reinterpret_cast<char*>(modInfo.lpBaseOfDll);
-    size_t moduleSize = modInfo.SizeOfImage;
-    if (!baseAddr || moduleSize == 0)
-        return "";
-    std::vector<std::string> markers = { "Unreal Engine 4.", "Unreal Engine 5.", "FEngineVersion", "EngineVersion" };
-    for (const auto& marker : markers) {
-        size_t markerLen = marker.length();
-        for (size_t i = 0; i < moduleSize - markerLen; i++) {
-            if (memcmp(baseAddr + i, marker.c_str(), markerLen) == 0) {
-                std::string found(marker);
-                size_t maxExtra = 32;
-                size_t j = i + markerLen;
-                while (j < moduleSize && (j - (i + markerLen)) < maxExtra && isprint(baseAddr[j])) {
-                    found.push_back(baseAddr[j]);
-                    j++;
-                }
-                return found;
-            }
+// Calculates adjustments to convert offsets within the PE.
+uint32_t getSectionDelta(const std::vector<Byte>& data, size_t offset) {
+    if (data.size() < sizeof(IMAGE_DOS_HEADER))
+        return 0;
+    const IMAGE_DOS_HEADER* dosHeader = reinterpret_cast<const IMAGE_DOS_HEADER*>(data.data());
+    if (dosHeader->e_magic != 0x5A4D) // "MZ"
+        return 0;
+    size_t peHeaderOffset = dosHeader->e_lfanew;
+    if (data.size() < peHeaderOffset + sizeof(uint32_t) + sizeof(IMAGE_FILE_HEADER))
+        return 0;
+    const uint32_t* peSignature = reinterpret_cast<const uint32_t*>(data.data() + peHeaderOffset);
+    if (*peSignature != 0x00004550) // "PE\0\0"
+        return 0;
+    const IMAGE_FILE_HEADER* fileHeader =
+        reinterpret_cast<const IMAGE_FILE_HEADER*>(data.data() + peHeaderOffset + sizeof(uint32_t));
+    size_t optHeaderOffset = peHeaderOffset + sizeof(uint32_t) + sizeof(IMAGE_FILE_HEADER);
+    size_t sectionHeadersStart = optHeaderOffset + fileHeader->SizeOfOptionalHeader;
+    for (int i = 0; i < fileHeader->NumberOfSections; i++) {
+        const IMAGE_SECTION_HEADER* section =
+            reinterpret_cast<const IMAGE_SECTION_HEADER*>(data.data() + sectionHeadersStart + i * sizeof(IMAGE_SECTION_HEADER));
+        uint32_t rawStart = section->PointerToRawData;
+        uint32_t rawEnd = rawStart + section->SizeOfRawData;
+        if (offset >= rawStart && offset < rawEnd) {
+            return section->VirtualAddress - section->PointerToRawData;
         }
     }
-    return "";
+    return 0;
 }
 
-std::string GetVersionFromProcessMemory(HANDLE hProcess) {
+// Memory scanning fallback to find offsets in the process memory.
+uint64_t findOffsetInProcessMemory(HANDLE hProcess, const std::vector<Byte>& pattern, const std::string& mask, const std::string& group) {
     HMODULE hMod;
     DWORD cbNeeded;
-    if (EnumProcessModules(hProcess, &hMod, sizeof(hMod), &cbNeeded)) {
-        MODULEINFO modInfo = { 0 };
-        if (GetModuleInformation(hProcess, hMod, &modInfo, sizeof(modInfo))) {
-            std::vector<char> buffer(modInfo.SizeOfImage);
-            SIZE_T bytesRead;
-            if (ReadProcessMemory(hProcess, modInfo.lpBaseOfDll, buffer.data(), modInfo.SizeOfImage, &bytesRead)) {
-                std::vector<std::string> markers = { "Unreal Engine 4.", "Unreal Engine 5.", "FEngineVersion", "EngineVersion" };
-                for (const auto& marker : markers) {
-                    size_t markerLen = marker.length();
-                    for (size_t i = 0; i < buffer.size() - markerLen; i++) {
-                        if (memcmp(buffer.data() + i, marker.c_str(), markerLen) == 0) {
-                            std::string found(marker);
-                            size_t maxExtra = 32;
-                            size_t j = i + markerLen;
-                            while (j < buffer.size() && (j - (i + markerLen)) < maxExtra && isprint(buffer[j])) {
-                                found.push_back(buffer[j]);
-                                j++;
-                            }
-                            return found;
-                        }
-                    }
+    if (!EnumProcessModules(hProcess, &hMod, sizeof(hMod), &cbNeeded))
+        return 0;
+    MODULEINFO modInfo = { 0 };
+    if (!GetModuleInformation(hProcess, hMod, &modInfo, sizeof(modInfo)))
+        return 0;
+    std::vector<Byte> buffer(modInfo.SizeOfImage);
+    SIZE_T bytesRead;
+    if (!ReadProcessMemory(hProcess, modInfo.lpBaseOfDll, buffer.data(), modInfo.SizeOfImage, &bytesRead))
+        return 0;
+    size_t foundOffset = findPatternMask(buffer, pattern, mask);
+    if (foundOffset == std::string::npos || foundOffset + 7 > buffer.size())
+        return 0;
+    foundOffset = adjustFoundOffsetForGroup(buffer, foundOffset, group);
+    int32_t disp = *reinterpret_cast<const int32_t*>(&buffer[foundOffset + 3]);
+    size_t nextInstr = foundOffset + 7;
+    size_t rawAddress = nextInstr + disp;
+    uint64_t rva = rawAddress;
+    return rva;
+}
+
+// Adjusts the found offset based on a group-specific prefix.
+// For example, if scanning for "GWorld", we may search nearby for a known instruction prefix.
+size_t adjustFoundOffsetForGroup(const std::vector<Byte>& data, size_t foundOffset, const std::string& group) {
+    std::vector<std::vector<Byte>> prefixes;
+    if (group == "GWorld") {
+        prefixes.push_back({ 0x48, 0x89, 0x05 });
+    }
+    else if (group == "GNames") {
+        prefixes.push_back({ 0x48, 0x8D, 0x0D }); // <= 4.27
+        prefixes.push_back({ 0x48, 0x8B, 0x05 }); // > 4.27
+    }
+    else if (group == "GObjects") {
+        prefixes.push_back({ 0x4C, 0x8B, 0x0D });
+    }
+    else {
+        return foundOffset;
+    }
+    size_t searchLimit = 30;
+    size_t limit = (foundOffset + searchLimit < data.size()) ? foundOffset + searchLimit : data.size();
+    for (size_t i = foundOffset; i <= limit; i++) {
+        for (const auto& prefix : prefixes) {
+            if (i + prefix.size() > data.size())
+                continue;
+            bool match = true;
+            for (size_t j = 0; j < prefix.size(); j++) {
+                if (data[i + j] != prefix[j]) {
+                    match = false;
+                    break;
                 }
             }
+            if (match)
+                return i;
         }
     }
-    return "";
-}
-
-bool IsProcessRunning(const std::string& exeNameNarrow, DWORD& processID) {
-    // convert narrow → wide
-    std::wstring exeNameWide(exeNameNarrow.begin(), exeNameNarrow.end());
-
-    HANDLE hSnapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
-    if (hSnapshot == INVALID_HANDLE_VALUE)
-        return false;
-
-    PROCESSENTRY32W pe;
-    pe.dwSize = sizeof(pe);
-
-    if (Process32FirstW(hSnapshot, &pe)) {
-        do {
-            // compare as wide strings
-            if (exeNameWide == pe.szExeFile) {
-                processID = pe.th32ProcessID;
-                CloseHandle(hSnapshot);
-                return true;
-            }
-        } while (Process32NextW(hSnapshot, &pe));
-    }
-
-    CloseHandle(hSnapshot);
-    return false;
-}
-
-std::string GetUnrealEngineVersion(const std::string& filePath, const std::string& exeName) {
-    DWORD processID = 0;
-    std::string version;
-    // If the process is running, try to scan its memory first.
-    if (IsProcessRunning(exeName, processID)) {
-        std::cout << "Process " << exeName << " is running (PID: " << processID << "). Attaching...\n";
-        HANDLE hProcess = OpenProcess(PROCESS_VM_READ | PROCESS_QUERY_INFORMATION, FALSE, processID);
-        if (hProcess) {
-            version = GetVersionFromProcessMemory(hProcess);
-            CloseHandle(hProcess);
-        }
-    }
-    // Fall back to file-based methods.
-    if (version.empty() || version == "EngineVersion" || version == "FEngineVersion")
-        version = GetVersionFromResource(filePath);
-    if (version.empty())
-        version = GetVersionFromFiles(filePath);
-    if (version.empty())
-        version = GetVersionFromMemoryScan();
-    return version.empty() ? "Unknown" : version;
+    return foundOffset;
 }
