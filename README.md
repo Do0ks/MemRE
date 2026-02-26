@@ -4,7 +4,7 @@
 
 MemRE is a lightweight Windows memory editor you can inject (or attach) into any running process to take control of in-application values. Guided “First Scan” & “Next Scan” workflows help you pinpoint addresses in seconds, while built-in pointer scanning (including Unreal Engine’s GWorld) resolves dynamic offsets for you. Customize hotkeys, monitor real-time logs, and export with one click to Cheat Engine (.CT) or our native table format.  
 ###### Precompiled download comes with MemRE and MemRE Loader.
-### For more information, join MemRE Discord for full documentation, nightly builds, tutorials, etc. I also push bug fixes there first: https://discord.gg/7nGkqwdJhn
+### For more information, join MemRE Discord for full documentation, nightly builds, tutorials, etc. I also push bug fixes there first: https://discord.gg/TRDsYfNEV8
 
 ### Known Issues/Fixes + Nightly Builds are now listed on [MemREs website](https://memre.io/)   
 
