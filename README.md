@@ -13,7 +13,7 @@ MemRE is a lightweight Windows memory editor you can inject (or attach) into any
 alt="MemRE" width="640" height="580" border="1" /></a>
 
 ### Looking for MemRE Launcher? you can find The MemRE Loader source here: https://github.com/Do0ks/MemRELoader
-### Looking for A Easy Injector?: https://github.com/Do0ks/Injector
+### Looking for A Easy Injector?: https://github.com/Do0ks/InjectorV2
 
 Demos/Pictures (More On [MemREs Website](https://memre.io/)):
 <Details>
