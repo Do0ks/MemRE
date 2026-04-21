@@ -6,7 +6,7 @@ MemRE is a lightweight Windows memory editor you can inject (or attach) into any
 ###### Precompiled download comes with MemRE and MemRE Loader.
 ### For more information, join MemRE Discord for full documentation, nightly builds, tutorials, etc. I also push bug fixes there first: https://discord.gg/TRDsYfNEV8
 
-### Known Issues/Fixes + Nightly Builds are now listed on [MemREs website](https://memre.io/)   
+### Known Issues/Fixes + Nightly Builds are now listed on [MemREs website](https://memre.stryx.org/)   
 
 <a href="http://www.youtube.com/watch?feature=player_embedded&v=ohHAiqsSopQ
 " target="_blank"><img src="http://img.youtube.com/vi/ohHAiqsSopQ/0.jpg" 
