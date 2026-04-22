@@ -1,6 +1,7 @@
 # MemRE! - UPDATE COMING SOON + NEW GUI
 ![MemRE](https://github.com/user-attachments/assets/d0f206b1-9e23-4e03-97e3-ac6842176cbe)
-### https://memre.io/
+### MemRE is now part of the Stryx Development Family
+### https://memre.stryx.org/
 
 MemRE is a lightweight Windows memory editor you can inject (or attach) into any running process to take control of in-application values. Guided “First Scan” & “Next Scan” workflows help you pinpoint addresses in seconds, while built-in pointer scanning (including Unreal Engine’s GWorld) resolves dynamic offsets for you. Customize hotkeys, monitor real-time logs, and export with one click to Cheat Engine (.CT) or our native table format.  
 ###### Precompiled download comes with MemRE and MemRE Loader.
